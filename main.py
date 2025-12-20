@@ -15,6 +15,7 @@ TODO:
 - handle printer disconnections and reconnections
 - improve status message formatting
 - dont resend status when bot restarts
+- change access code via command
 """
 
 LOG_CHAT_ID = cfg.LOG_CHAT_ID
@@ -48,6 +49,7 @@ async def log_message(message: str):
             return
         last_log_time = cur_time
         await send_telegram_message(message_buffer, LOG_CHAT_ID)
+        message_buffer = ''
 
 
 cur_status_msg_id = None
@@ -71,7 +73,7 @@ async def update_status_message(message):
     if message == prev_status_message:
         return
     prev_status_message = message
-
+    # print(message)
     async with bot:
         if cur_status_msg_id is None:
             msg = await bot.send_message(chat_id=STATUS_CHAT_ID, text=message, message_thread_id=STATUS_THREAD_ID, parse_mode=telegram.constants.ParseMode.MARKDOWN_V2)
@@ -111,7 +113,7 @@ async def update_printer_states(printers):
         # status_message += f', B: {bed_temp}°C, N: {nozzle_temp}°C'
         status_message += ')\n'
     status_message += 'Note: "FINISH (PRINTING)" means not in use\n'
-    status_message += f'Updated on: {time.strftime("%Y-%m-%d %H:%M:%S")}, ID: {cur_status_msg_id}\n'
+    status_message += f'Updated on: {time.strftime("%Y-%m-%d %H:%M")}, ID: {cur_status_msg_id}\n'
     status_message += '```\n'
     await update_status_message(status_message)
 
@@ -126,13 +128,13 @@ async def main():
 
         for i, printer in enumerate(PRINTERS):
             name, mac, ip, access_code, serial = printer
-            print(f'Connecting to printer {name} at IP {ip} with serial {serial} and access code {access_code}')
+            print(f'Connecting to printer {i+1} at IP {ip} with serial {serial} and access code {access_code}')
             try:
                 p = bl.Printer(ip, access_code, serial)
                 p.mqtt_start() # no need camera client for now
                 printers[i] = p
             except Exception as e:
-                print(f'Failed to connect to printer {name}: {e}')
+                print(f'Failed to connect to printer {i+1}: {e}')
 
         while True:
             await asyncio.sleep(1)
