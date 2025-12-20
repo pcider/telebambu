@@ -28,12 +28,15 @@ PRINTERS = cfg.PRINTERS
 
 bot = telegram.Bot(TELEGRAM_BOT_TOKEN)
 
-async def send_telegram_message(message: str, chat_id: str = CHAT_ID, thread_id: str = THREAD_ID):
+async def send_telegram_message(message: str, chat_id: str, thread_id: str = None):
     async with bot:
         await bot.send_message(chat_id=chat_id, text=message, message_thread_id=thread_id)
 
 last_log_time = 0
 message_buffer = ''
+
+async def send_update_message(message: str):
+    await send_telegram_message(message, CHAT_ID, THREAD_ID)
 
 async def log_message(message: str):
     print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {message}')
@@ -145,21 +148,21 @@ async def main():
                         await log_message(f'Printer {i+1} GCODE state changed from {prev_gcode_state} to {gcode_state}')
 
                         if gcode_state == GcodeState.FINISH:
-                            await send_telegram_message(f'Printer {i+1} has finished printing.')
+                            await send_update_message(f'Printer {i+1} has finished printing.')
 
                         elif gcode_state == GcodeState.FAILED:
                             err_code = printer.get_error_code()
-                            await send_telegram_message(f'Printer {i+1} failed! (code: {err_code})')
+                            await send_update_message(f'Printer {i+1} failed! (code: {err_code})')
 
                         elif prev_gcode_state == GcodeState.RUNNING and gcode_state == GcodeState.PAUSE:
                             now = time.time()
                             if now - lastPausedTime[i] > 60: # arbitrary 60s to avoid duplicate messages
                                 err_code = printer.get_error_code()
-                                await send_telegram_message(f'Printer {i+1} has paused printing. (code: {err_code})')
+                                await send_update_message(f'Printer {i+1} has paused printing. (code: {err_code})')
                                 lastPausedTime[i] = now
 
                         elif prev_gcode_state in (GcodeState.FINISH, GcodeState.IDLE) and gcode_state == GcodeState.RUNNING:
-                            await send_telegram_message(f'Printer {i+1} has started printing. (print time: {format_print_time(printer)})')
+                            await send_update_message(f'Printer {i+1} has started printing. (print time: {format_print_time(printer)})')
 
                     if prev_print_state != PrintStatus.UNKNOWN and prev_print_state != print_state:
                         await log_message(f'Printer {i+1} PRINT state changed from {prev_print_state} to {print_state}')
