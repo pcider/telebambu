@@ -121,7 +121,7 @@ async def update_printer_states(printers: list[Printer]):
             status_message += f', {progress}% done, {format_print_time(printer)} left'
 
         # status_message += f', B: {bed_temp}°C, N: {nozzle_temp}°C'
-        status_message += 'L {layer}/{total_layers})\n'
+        status_message += f', L{layer}/{total_layers})\n'
     status_message += 'Note: "FINISH/IDLE" means not in use\n'
     status_message += f'Updated on: {time.strftime("%Y-%m-%d %H:%M")}, ID: {cur_status_msg_id}\n'
     status_message += '```\n'
