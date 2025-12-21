@@ -1,6 +1,6 @@
 import time
 import bambulabs_api as bl
-from bambulabs_api import PrintStatus, GcodeState
+from bambulabs_api import PrintStatus, GcodeState, Printer
 import asyncio
 import telegram
 
@@ -14,7 +14,6 @@ TODO:
 - add /stop command to stop prints
 - handle printer disconnections and reconnections
 - improve status message formatting
-- dont resend status when bot restarts
 - change access code via command
 """
 
@@ -27,18 +26,24 @@ STATUS_THREAD_ID = cfg.STATUS_CHAT_ID.split('/')[1] if '/' in cfg.STATUS_CHAT_ID
 TELEGRAM_BOT_TOKEN = cfg.TELEGRAM_BOT_TOKEN
 PRINTERS = cfg.PRINTERS
 UPDATE_INTERVAL = cfg.UPDATE_INTERVAL
+UPDATE_START_PRINTING = cfg.UPDATE_START_PRINTING
 
 bot = telegram.Bot(TELEGRAM_BOT_TOKEN)
 
-async def send_telegram_message(message: str, chat_id: str, thread_id: str = None):
+async def send_telegram_message(message: str, chat_id: str, thread_id: str = None, image: bytes | bytearray = None):
+    if isinstance(image, bytearray):
+        image = bytes(image)
     async with bot:
-        await bot.send_message(chat_id=chat_id, text=message, message_thread_id=thread_id)
+        if image is not None:
+            await bot.send_photo(chat_id=chat_id, photo=telegram.InputFile(image), caption=message, message_thread_id=thread_id)
+        else:
+            await bot.send_message(chat_id=chat_id, text=message, message_thread_id=thread_id)
 
 last_log_time = 0
 message_buffer = ''
 
-async def send_update_message(message: str):
-    await send_telegram_message(message, CHAT_ID, THREAD_ID)
+async def send_update_message(message: str, image: bytearray = None):
+    await send_telegram_message(message, CHAT_ID, THREAD_ID, image)
 
 async def log_message(message: str):
     print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {message}')
@@ -91,7 +96,7 @@ def format_print_time(printer):
 
 last_update_time = 0
 
-async def update_printer_states(printers):
+async def update_printer_states(printers: list[Printer]):
     # global last_update_time
     # cur_time = time.time()
     # if cur_time - last_update_time < 10:
@@ -100,11 +105,15 @@ async def update_printer_states(printers):
 
     status_message = 'Printer Statuses:```c\n'
     for i, printer in enumerate(printers):
+        if not printer.mqtt_client_ready():
+            continue
         gcode_state = printer.get_state()
         print_state = printer.get_current_state()
         bed_temp = round(printer.get_bed_temperature())
         nozzle_temp = round(printer.get_nozzle_temperature())
-        
+        layer = printer.current_layer_num()
+        total_layers = printer.total_layer_num()
+
         status_message += f'{i+1}: {gcode_state} ({print_state}'
 
         if gcode_state not in (GcodeState.IDLE, GcodeState.FINISH, GcodeState.UNKNOWN):
@@ -112,8 +121,8 @@ async def update_printer_states(printers):
             status_message += f', {progress}% done, {format_print_time(printer)} left'
 
         # status_message += f', B: {bed_temp}°C, N: {nozzle_temp}°C'
-        status_message += ')\n'
-    status_message += 'Note: "FINISH (PRINTING)" means not in use\n'
+        status_message += 'L {layer}/{total_layers})\n'
+    status_message += 'Note: "FINISH/IDLE" means not in use\n'
     status_message += f'Updated on: {time.strftime("%Y-%m-%d %H:%M")}, ID: {cur_status_msg_id}\n'
     status_message += '```\n'
     await update_status_message(status_message)
@@ -123,7 +132,7 @@ async def main():
     await log_message('Bot started!')
     
     try:
-        printers = [None] * len(PRINTERS)
+        printers: list[Printer] = [None] * len(PRINTERS)
         prevState = [(GcodeState.UNKNOWN, PrintStatus.UNKNOWN)] * len(PRINTERS)
         lastPausedTime = [time.time()] * len(PRINTERS)
 
@@ -132,13 +141,14 @@ async def main():
             print(f'Connecting to printer {i+1} at IP {ip} with serial {serial} and access code {access_code}')
             try:
                 p = bl.Printer(ip, access_code, serial)
-                p.mqtt_start() # no need camera client for now
+                p.mqtt_start()
+                p.camera_start()
                 printers[i] = p
             except Exception as e:
                 print(f'Failed to connect to printer {i+1}: {e}')
 
         while True:
-            await asyncio.sleep(UPDATE_INTERVAL)
+            await asyncio.sleep(5)
             try:
                 await update_printer_states(printers)
             except Exception as e:
@@ -146,6 +156,9 @@ async def main():
 
             for i, printer in enumerate(printers):
                 try:
+                    if not printer.mqtt_client_ready():
+                        continue
+                    
                     prev_gcode_state, prev_print_state = prevState[i]
                     gcode_state = printer.get_state()
                     print_state = printer.get_current_state()
@@ -155,7 +168,7 @@ async def main():
                         await log_message(f'Printer {i+1} GCODE state changed from {prev_gcode_state} to {gcode_state}')
 
                         if gcode_state == GcodeState.FINISH:
-                            await send_update_message(f'Printer {i+1} has finished printing.')
+                            await send_update_message(f'Printer {i+1} has finished printing.', printer.camera_client.last_frame)
 
                         elif gcode_state == GcodeState.FAILED:
                             err_code = printer.get_error_code()
@@ -168,7 +181,7 @@ async def main():
                                 await send_update_message(f'Printer {i+1} has paused printing. (code: {err_code})')
                                 lastPausedTime[i] = now
 
-                        elif prev_gcode_state in (GcodeState.FINISH, GcodeState.IDLE, GcodeState.PREPARE) and gcode_state == GcodeState.RUNNING:
+                        elif UPDATE_START_PRINTING and prev_gcode_state in (GcodeState.FINISH, GcodeState.IDLE, GcodeState.PREPARE) and gcode_state == GcodeState.RUNNING:
                             await send_update_message(f'Printer {i+1} has started printing. (print time: {format_print_time(printer)})')
 
                     if prev_print_state != PrintStatus.UNKNOWN and prev_print_state != print_state:
