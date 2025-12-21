@@ -26,6 +26,7 @@ STATUS_THREAD_ID = cfg.STATUS_CHAT_ID.split('/')[1] if '/' in cfg.STATUS_CHAT_ID
 
 TELEGRAM_BOT_TOKEN = cfg.TELEGRAM_BOT_TOKEN
 PRINTERS = cfg.PRINTERS
+UPDATE_INTERVAL = cfg.UPDATE_INTERVAL
 
 bot = telegram.Bot(TELEGRAM_BOT_TOKEN)
 
@@ -137,8 +138,12 @@ async def main():
                 print(f'Failed to connect to printer {i+1}: {e}')
 
         while True:
-            await asyncio.sleep(1)
-            await update_printer_states(printers)
+            await asyncio.sleep(UPDATE_INTERVAL)
+            try:
+                await update_printer_states(printers)
+            except Exception as e:
+                print(f'Failed to update printer states: {e}')
+
             for i, printer in enumerate(printers):
                 try:
                     prev_gcode_state, prev_print_state = prevState[i]
@@ -163,7 +168,7 @@ async def main():
                                 await send_update_message(f'Printer {i+1} has paused printing. (code: {err_code})')
                                 lastPausedTime[i] = now
 
-                        elif prev_gcode_state in (GcodeState.FINISH, GcodeState.IDLE) and gcode_state == GcodeState.RUNNING:
+                        elif prev_gcode_state in (GcodeState.FINISH, GcodeState.IDLE, GcodeState.PREPARE) and gcode_state == GcodeState.RUNNING:
                             await send_update_message(f'Printer {i+1} has started printing. (print time: {format_print_time(printer)})')
 
                     if prev_print_state != PrintStatus.UNKNOWN and prev_print_state != print_state:
