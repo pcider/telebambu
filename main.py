@@ -45,7 +45,7 @@ message_buffer = ''
 async def send_update_message(message: str, image: bytearray = None):
     await send_telegram_message(message, CHAT_ID, THREAD_ID, image)
 
-async def log_message(message: str):
+async def log_message(message: str, image: bytearray = None):
     print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {message}')
     if LOG_CHAT_ID:
         global last_log_time, message_buffer
@@ -54,7 +54,7 @@ async def log_message(message: str):
         if cur_time - last_log_time < 5:
             return
         last_log_time = cur_time
-        await send_telegram_message(message_buffer, LOG_CHAT_ID)
+        await send_telegram_message(message_buffer, LOG_CHAT_ID, image=image)
         message_buffer = ''
 
 
@@ -141,8 +141,7 @@ async def main():
             print(f'Connecting to printer {i+1} at IP {ip} with serial {serial} and access code {access_code}')
             try:
                 p = bl.Printer(ip, access_code, serial)
-                p.mqtt_start()
-                p.camera_start()
+                p.connect()
                 printers[i] = p
             except Exception as e:
                 print(f'Failed to connect to printer {i+1}: {e}')
@@ -168,17 +167,22 @@ async def main():
                         await log_message(f'Printer {i+1} GCODE state changed from {prev_gcode_state} to {gcode_state}')
 
                         if gcode_state == GcodeState.FINISH:
+                            printer.turn_light_on()
+                            printer.camera_client.last_frame = None
+                            while not printer.camera_client.last_frame:
+                                await asyncio.sleep(1)
                             await send_update_message(f'Printer {i+1} has finished printing.', printer.camera_client.last_frame)
+                            printer.turn_light_off()
 
                         elif gcode_state == GcodeState.FAILED:
-                            err_code = printer.get_error_code()
-                            await send_update_message(f'Printer {i+1} failed! (code: {err_code})')
+                            err_code = printer.print_error_code()
+                            await log_message(f'Printer {i+1} failed! (code: {err_code})', printer.camera_client.last_frame)
 
                         elif prev_gcode_state == GcodeState.RUNNING and gcode_state == GcodeState.PAUSE:
                             now = time.time()
                             if now - lastPausedTime[i] > 60: # arbitrary 60s to avoid duplicate messages
-                                err_code = printer.get_error_code()
-                                await send_update_message(f'Printer {i+1} has paused printing. (code: {err_code})')
+                                err_code = printer.print_error_code()
+                                await log_message(f'Printer {i+1} has paused printing. (code: {err_code})', printer.camera_client.last_frame)
                                 lastPausedTime[i] = now
 
                         elif UPDATE_START_PRINTING and prev_gcode_state in (GcodeState.FINISH, GcodeState.IDLE, GcodeState.PREPARE) and gcode_state == GcodeState.RUNNING:
