@@ -148,6 +148,10 @@ async def main():
 
         while True:
             await asyncio.sleep(5)
+            if not printer.mqtt_client_connected():
+                await log_message(f'Printer {i} not connected, reconnecting')
+                printer.connect()
+
             try:
                 await update_printer_states(printers)
             except Exception as e:
