@@ -4,6 +4,8 @@ LOG_CHAT_ID = '1234567890' # Set to None to disable logging
 CHAT_ID = '1234567890/1234' # Main chat ID for print updates
 STATUS_CHAT_ID = '1234567890/1234' # Chat ID for status messages
 
+OWNER_ID = 1234567890  # Bot owner user ID (can use /camera command)
+
 TELEGRAM_BOT_TOKEN = '1234567890:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'
 
 UPDATE_INTERVAL = 3  # seconds
