@@ -85,6 +85,44 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
 
     app.add_handler(CommandHandler("camera", handle_camera))
 
+    # /start command - handles deep links from "Start DM with bot" button
+    async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+
+        # Check if this is a deep link with claim parameter
+        if context.args and context.args[0].startswith("claim_"):
+            printer_index = int(context.args[0].split("_")[1])
+
+            session = storage.get_print(printer_index)
+            if not session:
+                await update.message.reply_text("This print session has ended.")
+                return
+
+            # Verify this user is the one who claimed it
+            if session.claimed_by != user.id:
+                await update.message.reply_text("You are not the claimer of this print.")
+                return
+
+            # Show preference selection
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Main Chat (Recommended)", callback_data=f"dm_pref_{printer_index}_chat"),
+                    InlineKeyboardButton("Send to DM only", callback_data=f"dm_pref_{printer_index}_dm")
+                ]
+            ])
+
+            await update.message.reply_text(
+                f"You claimed Printer {printer_index + 1}!\n\nWhere would you like to receive the finished print image?",
+                reply_markup=keyboard
+            )
+        else:
+            # Generic start message
+            await update.message.reply_text(
+                "Welcome! Use the buttons in the main chat to claim prints."
+            )
+
+    app.add_handler(CommandHandler("start", handle_start))
+
 
 async def handle_claim(query, user, storage: Storage, message_service, context):
     data = query.data
@@ -105,21 +143,32 @@ async def handle_claim(query, user, storage: Storage, message_service, context):
     # Edit the original message to show who claimed it
     print_time_str = f" (print time: {session.print_time})" if session.print_time else ""
     new_text = f"Printer {printer_index + 1} started by {username}{print_time_str}"
-    await query.edit_message_text(new_text)
 
-    # DM the user asking for their preference
-    keyboard = InlineKeyboardMarkup([
+    # Try to DM the user asking for their preference
+    dm_keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("Main Chat (Recommended)", callback_data=f"dm_pref_{printer_index}_chat"),
             InlineKeyboardButton("Send to DM only", callback_data=f"dm_pref_{printer_index}_dm")
         ]
     ])
 
-    await context.bot.send_message(
-        chat_id=user.id,
-        text=f"You claimed Printer {printer_index + 1}!\n\nWhere would you like to receive the finished print image?",
-        reply_markup=keyboard
-    )
+    try:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=f"You claimed Printer {printer_index + 1}!\n\nWhere would you like to receive the finished print image?",
+            reply_markup=dm_keyboard
+        )
+        await query.edit_message_text(new_text)
+    except Exception:
+        # User hasn't started a conversation with the bot yet
+        bot_username = context.bot.username
+        start_dm_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Start DM with bot", url=f"https://t.me/{bot_username}?start=claim_{printer_index}")]
+        ])
+        await query.edit_message_text(
+            f"{new_text}\n\n{username}, please start a conversation with the bot to configure your print settings:",
+            reply_markup=start_dm_keyboard
+        )
 
 
 def _build_settings_message(printer_index: int, dm_preference: str, layer2_notify: bool) -> tuple[str, InlineKeyboardMarkup]:
