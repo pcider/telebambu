@@ -115,6 +115,20 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
                 f"You claimed Printer {printer_index + 1}!\n\nWhere would you like to receive the finished print image?",
                 reply_markup=keyboard
             )
+
+            # Update the main chat message to remove the "Start DM" button
+            print_time_str = f" (print time: {session.print_time})" if session.print_time else ""
+            new_text = f"Printer {printer_index + 1} started by {session.claimed_username}{print_time_str}"
+            try:
+                # Parse chat_id (may be in format "chat_id/thread_id")
+                chat_id = session.chat_id.split("/")[0] if "/" in session.chat_id else session.chat_id
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=session.message_id,
+                    text=new_text
+                )
+            except Exception as e:
+                print(f'Exception: could not edit main chat message {session.message_id} on /start deep link: {e}')
         else:
             # Generic start message
             await update.message.reply_text(
