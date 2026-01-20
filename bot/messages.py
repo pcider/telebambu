@@ -34,7 +34,7 @@ class MessageService:
             reply_markup=keyboard
         )
 
-        self.storage.start_print(printer_index, msg.message_id, self.ctx.chat_id)
+        self.storage.start_print(printer_index, msg.message_id, self.ctx.chat_id, print_time)
         return msg.message_id
 
     async def send_print_finished(self, printer_index: int, image: bytes | bytearray | None):
@@ -81,7 +81,7 @@ class MessageService:
 
         self.storage.end_print(printer_index)
 
-    async def send_layer2_notification(self, printer_index: int):
+    async def send_layer2_notification(self, printer_index: int, image: bytes | bytearray | None = None):
         session = self.storage.get_print(printer_index)
         if not session or not session.claimed_by:
             return
@@ -89,15 +89,22 @@ class MessageService:
         if not session.layer2_notify or session.layer2_notified:
             return
 
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Turn off layer notifications", callback_data=f"layer2_off_{printer_index}")]
-        ])
+        if isinstance(image, bytearray):
+            image = bytes(image)
 
-        await self.bot.send_message(
-            chat_id=session.claimed_by,
-            text=f"Printer {printer_index + 1}: Layer 2 complete! Your print is progressing well.",
-            reply_markup=keyboard
-        )
+        message = f"Printer {printer_index + 1}: Layer 2 complete! Your print is progressing well."
+
+        if image:
+            await self.bot.send_photo(
+                chat_id=session.claimed_by,
+                photo=InputFile(image),
+                caption=message
+            )
+        else:
+            await self.bot.send_message(
+                chat_id=session.claimed_by,
+                text=message
+            )
 
         self.storage.mark_layer2_notified(printer_index)
 

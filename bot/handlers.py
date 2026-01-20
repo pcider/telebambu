@@ -17,27 +17,42 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
             await handle_claim(query, user, storage, message_service, context)
         elif data.startswith("dm_pref_"):
             await handle_dm_preference(query, user, storage, message_service)
-        elif data.startswith("layer2_off_"):
-            await handle_layer2_off(query, user, storage)
+        elif data.startswith("layer2_toggle_"):
+            await handle_layer2_toggle(query, user, storage)
 
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    # Owner-only /camera command
+    # /camera command - owner has full access, claimers can access their printer
     async def handle_camera(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
-        if user_id != cfg.OWNER_ID:
-            await update.message.reply_text("You are not authorized to use this command.")
-            return
+        is_owner = user_id == cfg.OWNER_ID
 
         if not printer_manager:
             await update.message.reply_text("Printer manager not available.")
             return
 
+        # Find which printer this user has claimed (if any)
+        claimed_printer_index = None
+        for idx, session in storage.active_prints.items():
+            if session.claimed_by == user_id:
+                claimed_printer_index = idx
+                break
+
+        if not is_owner and claimed_printer_index is None:
+            await update.message.reply_text("You don't have access to any printer camera.")
+            return
+
         if not context.args:
-            await update.message.reply_text(
-                f"Usage: /camera <printer_number>\n"
-                f"Available printers: 1-{len(cfg.PRINTERS)}"
-            )
+            if is_owner:
+                await update.message.reply_text(
+                    f"Usage: /camera <printer_number>\n"
+                    f"Available printers: 1-{len(cfg.PRINTERS)}"
+                )
+            else:
+                await update.message.reply_text(
+                    f"Usage: /camera {claimed_printer_index + 1}\n"
+                    f"You have access to Printer {claimed_printer_index + 1} while your print is active."
+                )
             return
 
         try:
@@ -46,6 +61,13 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
 
             if printer_index < 0 or printer_index >= len(cfg.PRINTERS):
                 await update.message.reply_text(f"Invalid printer number. Use 1-{len(cfg.PRINTERS)}")
+                return
+
+            # Check permission: owner can access all, claimers only their printer
+            if not is_owner and printer_index != claimed_printer_index:
+                await update.message.reply_text(
+                    f"You only have access to Printer {claimed_printer_index + 1} while your print is active."
+                )
                 return
 
             frame = printer_manager.get_camera_frame(printer_index)
@@ -81,7 +103,8 @@ async def handle_claim(query, user, storage: Storage, message_service, context):
     session = storage.claim_print(printer_index, user.id, username)
 
     # Edit the original message to show who claimed it
-    new_text = f"Printer {printer_index + 1} started by {username}"
+    print_time_str = f" (print time: {session.print_time})" if session.print_time else ""
+    new_text = f"Printer {printer_index + 1} started by {username}{print_time_str}"
     await query.edit_message_text(new_text)
 
     # DM the user asking for their preference
@@ -99,6 +122,31 @@ async def handle_claim(query, user, storage: Storage, message_service, context):
     )
 
 
+def _build_settings_message(printer_index: int, dm_preference: str, layer2_notify: bool) -> tuple[str, InlineKeyboardMarkup]:
+    printer_num = printer_index + 1
+
+    if dm_preference == "chat":
+        destination = "main chat"
+    else:
+        destination = "here privately"
+
+    layer2_status = "ON" if layer2_notify else "OFF"
+    layer2_btn_text = "Layer 2 Notify: ON" if layer2_notify else "Layer 2 Notify: OFF"
+
+    text = (
+        f"Settings for Printer {printer_num}:\n"
+        f"- Finished image: {destination}\n"
+        f"- Layer 2 notification: {layer2_status}\n\n"
+        f"You can use /camera {printer_num} to check on your print while it's active."
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(layer2_btn_text, callback_data=f"layer2_toggle_{printer_index}")]
+    ])
+
+    return text, keyboard
+
+
 async def handle_dm_preference(query, user, storage: Storage, message_service):
     data = query.data
     parts = data.split("_")
@@ -107,25 +155,25 @@ async def handle_dm_preference(query, user, storage: Storage, message_service):
 
     storage.set_dm_preference(printer_index, preference)
 
-    if preference == "chat":
-        await query.edit_message_text(
-            f"Got it! The finished print image will be shown in the main chat.\n"
-            f"You'll also get a layer 2 notification here when your print progresses."
-        )
-    else:
-        await query.edit_message_text(
-            f"Got it! The finished print image will be sent to you here privately.\n"
-            f"You'll also get a layer 2 notification here when your print progresses."
-        )
+    session = storage.get_print(printer_index)
+    layer2_notify = session.layer2_notify if session else True
+
+    text, keyboard = _build_settings_message(printer_index, preference, layer2_notify)
+    await query.edit_message_text(text, reply_markup=keyboard)
 
 
-async def handle_layer2_off(query, user, storage: Storage):
+async def handle_layer2_toggle(query, user, storage: Storage):
     data = query.data
     printer_index = int(data.split("_")[2])
 
-    storage.set_layer2_notify(printer_index, False)
+    session = storage.get_print(printer_index)
+    if not session:
+        await query.edit_message_text("This print session has ended.")
+        return
 
-    await query.edit_message_text(
-        "Layer notifications turned off for this print.\n"
-        "This will be remembered for your future prints."
-    )
+    # Toggle the current value
+    new_value = not session.layer2_notify
+    storage.set_layer2_notify(printer_index, new_value)
+
+    text, keyboard = _build_settings_message(printer_index, session.dm_preference, new_value)
+    await query.edit_message_text(text, reply_markup=keyboard)

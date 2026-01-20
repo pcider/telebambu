@@ -74,4 +74,4 @@ async def handle_event(event, message_service: MessageService):
     elif event.type == EventType.LAYER_CHANGED:
         layer = event.data['layer']
         if layer == 2:
-            await message_service.send_layer2_notification(i)
+            await message_service.send_layer2_notification(i, printer.camera_client.last_frame)

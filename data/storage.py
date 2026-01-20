@@ -16,6 +16,7 @@ class PrintSession:
     dm_preference: str = "chat"  # "chat" or "dm"
     layer2_notify: bool = True
     layer2_notified: bool = False
+    print_time: Optional[str] = None
 
 
 @dataclass
@@ -63,11 +64,12 @@ class Storage:
         with open(DATA_FILE, 'w') as f:
             json.dump(data, f, indent=2)
 
-    def start_print(self, printer_index: int, message_id: int, chat_id: str) -> PrintSession:
+    def start_print(self, printer_index: int, message_id: int, chat_id: str, print_time: str = None) -> PrintSession:
         session = PrintSession(
             message_id=message_id,
             chat_id=chat_id,
-            printer_index=printer_index
+            printer_index=printer_index,
+            print_time=print_time
         )
         self.active_prints[printer_index] = session
         self._save()
