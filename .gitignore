@@ -3,3 +3,4 @@ __pycache__/
 venv/
 cur_status_id.txt
 *.log
+data.json
