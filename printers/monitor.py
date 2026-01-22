@@ -41,7 +41,9 @@ async def handle_event(event, message_service: MessageService):
             )
 
     elif event.type == EventType.PRINT_STARTED:
-        print_time = message_service.format_print_time(event.data['print_time'])
+        # Delay to allow printer to update print time estimate
+        await asyncio.sleep(2)
+        print_time = message_service.format_print_time(printer.get_time())
         await message_service.send_print_started(i, print_time)
 
     elif event.type == EventType.PRINT_FINISHED:
