@@ -85,6 +85,100 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
 
     app.add_handler(CommandHandler("camera", handle_camera))
 
+    # /notify command - set a layer to be notified at
+    async def handle_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+
+        # Find which printer this user has claimed
+        claimed_printer_index = None
+        for idx, session in storage.active_prints.items():
+            if session.claimed_by == user_id:
+                claimed_printer_index = idx
+                break
+
+        if claimed_printer_index is None:
+            await update.message.reply_text("You don't have an active print claimed.")
+            return
+
+        if not context.args:
+            await update.message.reply_text("Usage: /notify <layer>\nExample: /notify 50")
+            return
+
+        try:
+            layer = int(context.args[0])
+            if layer < 1:
+                await update.message.reply_text("Layer must be a positive number.")
+                return
+
+            storage.set_notify_layer(claimed_printer_index, layer)
+            await update.message.reply_text(f"You will be notified when layer {layer} is reached on Printer {claimed_printer_index + 1}.")
+
+        except ValueError:
+            await update.message.reply_text("Please provide a valid layer number.")
+
+    app.add_handler(CommandHandler("notify", handle_notify))
+
+    # /info command - show info about user's current print
+    async def handle_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+
+        # Find which printer this user has claimed
+        claimed_printer_index = None
+        session = None
+        for idx, s in storage.active_prints.items():
+            if s.claimed_by == user_id:
+                claimed_printer_index = idx
+                session = s
+                break
+
+        if claimed_printer_index is None:
+            await update.message.reply_text("You don't have an active print claimed.")
+            return
+
+        if not printer_manager:
+            await update.message.reply_text("Printer manager not available.")
+            return
+
+        printer = printer_manager.get_printer(claimed_printer_index)
+        if not printer or not printer.mqtt_client_ready():
+            await update.message.reply_text(f"Printer {claimed_printer_index + 1} is not connected.")
+            return
+
+        # Gather print info
+        progress = printer.get_percentage()
+        time_left = printer_manager._format_print_time(printer.get_time())
+        current_layer = printer.current_layer_num()
+        total_layers = printer.total_layer_num()
+        gcode_state = printer.get_state()
+
+        info_text = (
+            f"Printer {claimed_printer_index + 1} Info:\n"
+            f"- Status: {gcode_state}\n"
+            f"- Progress: {progress}%\n"
+            f"- Time remaining: {time_left}\n"
+            f"- Layer: {current_layer}/{total_layers}\n"
+        )
+
+        if session.notify_layer and not session.notify_layer_notified:
+            info_text += f"- Layer notification: {session.notify_layer}\n"
+
+        await update.message.reply_text(info_text)
+
+    app.add_handler(CommandHandler("info", handle_info))
+
+    # /help command
+    async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        help_text = (
+            "Available commands:\n"
+            "/help - Show this help message\n"
+            "/info - Show info about your current print\n"
+            "/notify <layer> - Get notified when a specific layer is reached\n"
+            "/camera <printer> - View camera image from a printer"
+        )
+        await update.message.reply_text(help_text)
+
+    app.add_handler(CommandHandler("help", handle_help))
+
     # /start command - handles deep links from "Start DM with bot" button
     async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user

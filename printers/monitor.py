@@ -77,3 +77,6 @@ async def handle_event(event, message_service: MessageService):
         layer = event.data['layer']
         if layer == 2:
             await message_service.send_layer2_notification(i, printer.camera_client.last_frame)
+
+        # Check for custom layer notification
+        await message_service.send_custom_layer_notification(i, layer, printer.camera_client.last_frame)

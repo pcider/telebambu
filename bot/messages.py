@@ -108,6 +108,36 @@ class MessageService:
 
         self.storage.mark_layer2_notified(printer_index)
 
+    async def send_custom_layer_notification(self, printer_index: int, current_layer: int, image: bytes | bytearray | None = None):
+        session = self.storage.get_print(printer_index)
+        if not session or not session.claimed_by:
+            return
+
+        if not session.notify_layer or session.notify_layer_notified:
+            return
+
+        if current_layer < session.notify_layer:
+            return
+
+        if isinstance(image, bytearray):
+            image = bytes(image)
+
+        message = f"Printer {printer_index + 1}: Layer {session.notify_layer} reached!"
+
+        if image:
+            await self.bot.send_photo(
+                chat_id=session.claimed_by,
+                photo=InputFile(image),
+                caption=message
+            )
+        else:
+            await self.bot.send_message(
+                chat_id=session.claimed_by,
+                text=message
+            )
+
+        self.storage.mark_notify_layer_notified(printer_index)
+
     async def send_update_message(self, message: str, image: bytes | bytearray | None = None):
         if isinstance(image, bytearray):
             image = bytes(image)

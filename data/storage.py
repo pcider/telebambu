@@ -17,6 +17,8 @@ class PrintSession:
     layer2_notify: bool = True
     layer2_notified: bool = False
     print_time: Optional[str] = None
+    notify_layer: Optional[int] = None
+    notify_layer_notified: bool = False
 
 
 @dataclass
@@ -118,6 +120,19 @@ class Storage:
         session = self.active_prints.get(printer_index)
         if session:
             session.layer2_notified = True
+            self._save()
+
+    def set_notify_layer(self, printer_index: int, layer: int):
+        session = self.active_prints.get(printer_index)
+        if session:
+            session.notify_layer = layer
+            session.notify_layer_notified = False
+            self._save()
+
+    def mark_notify_layer_notified(self, printer_index: int):
+        session = self.active_prints.get(printer_index)
+        if session:
+            session.notify_layer_notified = True
             self._save()
 
     def end_print(self, printer_index: int) -> Optional[PrintSession]:
