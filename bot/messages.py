@@ -202,19 +202,19 @@ class MessageService:
             )
             self.storage.set_status_message_id(msg.message_id)
         else:
-            try:
-                await self.bot.edit_message_text(
-                    chat_id=self.ctx.status_chat_id,
-                    message_id=self.storage.status_message_id,
-                    text=message,
-                    parse_mode=ParseMode.MARKDOWN_V2
-                )
-            except Exception:
+            # try:
+            await self.bot.edit_message_text(
+                chat_id=self.ctx.status_chat_id,
+                message_id=self.storage.status_message_id,
+                text=message,
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            # except Exception:
                 # Message might have been deleted, create a new one
-                msg = await self.bot.send_message(
-                    chat_id=self.ctx.status_chat_id,
-                    text=message,
-                    message_thread_id=self.ctx.status_thread_id,
-                    parse_mode=ParseMode.MARKDOWN_V2
-                )
-                self.storage.set_status_message_id(msg.message_id)
+                # msg = await self.bot.send_message(
+                #     chat_id=self.ctx.status_chat_id,
+                #     text=message,
+                #     message_thread_id=self.ctx.status_thread_id,
+                #     parse_mode=ParseMode.MARKDOWN_V2
+                # )
+                # self.storage.set_status_message_id(msg.message_id)
