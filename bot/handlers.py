@@ -166,6 +166,52 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
 
     app.add_handler(CommandHandler("info", handle_info))
 
+    # /unclaim command - unclaim the print and revert main chat message
+    async def handle_unclaim(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+
+        # Find which printer this user has claimed
+        claimed_printer_index = None
+        session = None
+        for idx, s in storage.active_prints.items():
+            if s.claimed_by == user_id:
+                claimed_printer_index = idx
+                session = s
+                break
+
+        if claimed_printer_index is None:
+            await update.message.reply_text("You don't have an active print claimed.")
+            return
+
+        # Store message info before unclaiming
+        message_id = session.message_id
+        chat_id = session.chat_id.split("/")[0] if "/" in session.chat_id else session.chat_id
+        print_time = session.print_time
+
+        # Unclaim the print
+        storage.unclaim_print(claimed_printer_index)
+
+        # Restore the main chat message with the Claim Print button
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Claim Print", callback_data=f"claim_{claimed_printer_index}")]
+        ])
+
+        print_time_str = f" (print time: {print_time})" if print_time else ""
+        message = f"Printer {claimed_printer_index + 1} has started printing.{print_time_str}"
+
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=message,
+                reply_markup=keyboard
+            )
+            await update.message.reply_text(f"You have unclaimed Printer {claimed_printer_index + 1}.")
+        except Exception as e:
+            await update.message.reply_text(f"Unclaimed Printer {claimed_printer_index + 1}, but could not update the main chat message.")
+
+    app.add_handler(CommandHandler("unclaim", handle_unclaim))
+
     # /help command
     async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text = (
@@ -173,7 +219,8 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
             "/help - Show this help message\n"
             "/info - Show info about your current print\n"
             "/notify <layer> - Get notified when a specific layer is reached\n"
-            "/camera <printer> - View camera image from a printer"
+            "/camera <printer> - View camera image from a printer\n"
+            "/unclaim - Unclaim your current print"
         )
         await update.message.reply_text(help_text)
 

@@ -143,6 +143,21 @@ class Storage:
     def get_print(self, printer_index: int) -> Optional[PrintSession]:
         return self.active_prints.get(printer_index)
 
+    def unclaim_print(self, printer_index: int) -> Optional[PrintSession]:
+        session = self.active_prints.get(printer_index)
+        if not session:
+            return None
+
+        session.claimed_by = None
+        session.claimed_username = None
+        session.dm_preference = "chat"
+        session.layer2_notify = True
+        session.layer2_notified = False
+        session.notify_layer = None
+        session.notify_layer_notified = False
+        self._save()
+        return session
+
     def set_status_message_id(self, message_id: int):
         self.status_message_id = message_id
         self._save()
