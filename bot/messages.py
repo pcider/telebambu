@@ -21,6 +21,17 @@ class MessageService:
         return f'{hrs}h{mins}m' if hrs > 0 else f'{mins}m'
 
     async def send_print_started(self, printer_index: int, print_time: str) -> int:
+        # Delete previous "started printing" message for this printer to prevent spam
+        old_session = self.storage.get_print(printer_index)
+        if old_session:
+            try:
+                await self.bot.delete_message(
+                    chat_id=old_session.chat_id,
+                    message_id=old_session.message_id
+                )
+            except Exception:
+                pass  # Message may have already been deleted
+
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("Claim Print", callback_data=f"claim_{printer_index}")]
         ])
@@ -42,6 +53,17 @@ class MessageService:
             image = bytes(image)
 
         session = self.storage.get_print(printer_index)
+
+        # Delete the "started printing" message to prevent spam
+        if session:
+            try:
+                await self.bot.delete_message(
+                    chat_id=session.chat_id,
+                    message_id=session.message_id
+                )
+            except Exception:
+                pass  # Message may have already been deleted
+
         message = f"Printer {printer_index + 1} has finished printing."
 
         if session and session.claimed_by:
