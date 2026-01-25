@@ -20,7 +20,7 @@ class MessageService:
         mins = total_mins % 60
         return f'{hrs}h{mins}m' if hrs > 0 else f'{mins}m'
 
-    async def send_print_started(self, printer_index: int, print_time: str) -> int:
+    async def send_print_started(self, printer_index: int, print_time: str, total_layers: int = 0) -> int:
         # Delete previous "started printing" message for this printer to prevent spam
         old_session = self.storage.get_print(printer_index)
         if old_session:
@@ -36,7 +36,7 @@ class MessageService:
             [InlineKeyboardButton("Claim Print", callback_data=f"claim_{printer_index}")]
         ])
 
-        message = f"Printer {printer_index + 1} has started printing. (print time: {print_time})"
+        message = f"Printer {printer_index + 1} has started printing. (time: {print_time}, layers: {total_layers})"
 
         msg = await self.bot.send_message(
             chat_id=self.ctx.chat_id,
@@ -115,17 +115,22 @@ class MessageService:
             image = bytes(image)
 
         message = f"Printer {printer_index + 1}: Layer 2 complete! Your print is progressing well."
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Unclaim Print", callback_data=f"unclaim_{printer_index}")]
+        ])
 
         if image:
             await self.bot.send_photo(
                 chat_id=session.claimed_by,
                 photo=InputFile(image),
-                caption=message
+                caption=message,
+                reply_markup=keyboard
             )
         else:
             await self.bot.send_message(
                 chat_id=session.claimed_by,
-                text=message
+                text=message,
+                reply_markup=keyboard
             )
 
         self.storage.mark_layer2_notified(printer_index)
@@ -145,20 +150,60 @@ class MessageService:
             image = bytes(image)
 
         message = f"Printer {printer_index + 1}: Layer {session.notify_layer} reached!"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Unclaim Print", callback_data=f"unclaim_{printer_index}")]
+        ])
 
         if image:
             await self.bot.send_photo(
                 chat_id=session.claimed_by,
                 photo=InputFile(image),
-                caption=message
+                caption=message,
+                reply_markup=keyboard
             )
         else:
             await self.bot.send_message(
                 chat_id=session.claimed_by,
-                text=message
+                text=message,
+                reply_markup=keyboard
             )
 
         self.storage.mark_notify_layer_notified(printer_index)
+
+    async def send_percent_notification(self, printer_index: int, current_percent: int, image: bytes | bytearray | None = None):
+        session = self.storage.get_print(printer_index)
+        if not session or not session.claimed_by:
+            return
+
+        if not session.notify_percent or session.notify_percent_notified:
+            return
+
+        if current_percent < session.notify_percent:
+            return
+
+        if isinstance(image, bytearray):
+            image = bytes(image)
+
+        message = f"Printer {printer_index + 1}: {session.notify_percent}% reached!"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Unclaim Print", callback_data=f"unclaim_{printer_index}")]
+        ])
+
+        if image:
+            await self.bot.send_photo(
+                chat_id=session.claimed_by,
+                photo=InputFile(image),
+                caption=message,
+                reply_markup=keyboard
+            )
+        else:
+            await self.bot.send_message(
+                chat_id=session.claimed_by,
+                text=message,
+                reply_markup=keyboard
+            )
+
+        self.storage.mark_notify_percent_notified(printer_index)
 
     async def send_update_message(self, message: str, image: bytes | bytearray | None = None):
         if isinstance(image, bytearray):

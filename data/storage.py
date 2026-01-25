@@ -19,6 +19,8 @@ class PrintSession:
     print_time: Optional[str] = None
     notify_layer: Optional[int] = None
     notify_layer_notified: bool = False
+    notify_percent: Optional[int] = None
+    notify_percent_notified: bool = False
 
 
 @dataclass
@@ -135,6 +137,19 @@ class Storage:
             session.notify_layer_notified = True
             self._save()
 
+    def set_notify_percent(self, printer_index: int, percent: int):
+        session = self.active_prints.get(printer_index)
+        if session:
+            session.notify_percent = percent
+            session.notify_percent_notified = False
+            self._save()
+
+    def mark_notify_percent_notified(self, printer_index: int):
+        session = self.active_prints.get(printer_index)
+        if session:
+            session.notify_percent_notified = True
+            self._save()
+
     def end_print(self, printer_index: int) -> Optional[PrintSession]:
         session = self.active_prints.pop(printer_index, None)
         self._save()
@@ -155,6 +170,8 @@ class Storage:
         session.layer2_notified = False
         session.notify_layer = None
         session.notify_layer_notified = False
+        session.notify_percent = None
+        session.notify_percent_notified = False
         self._save()
         return session
 

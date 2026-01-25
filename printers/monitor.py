@@ -44,7 +44,8 @@ async def handle_event(event, message_service: MessageService):
         # Delay to allow printer to update print time estimate
         await asyncio.sleep(2)
         print_time = message_service.format_print_time(printer.get_time())
-        await message_service.send_print_started(i, print_time)
+        total_layers = printer.total_layer_num()
+        await message_service.send_print_started(i, print_time, total_layers)
 
     elif event.type == EventType.PRINT_FINISHED:
         printer.turn_light_on()
@@ -80,3 +81,7 @@ async def handle_event(event, message_service: MessageService):
 
         # Check for custom layer notification
         await message_service.send_custom_layer_notification(i, layer, printer.camera_client.last_frame)
+
+        # Check for percentage notification
+        percent = printer.get_percentage()
+        await message_service.send_percent_notification(i, percent, printer.camera_client.last_frame)

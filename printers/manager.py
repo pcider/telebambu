@@ -33,6 +33,7 @@ class PrinterManager:
         ] * len(printer_configs)
         self.prev_layers: list[int] = [0] * len(printer_configs)
         self.last_paused_time: list[float] = [0.0] * len(printer_configs)
+        self._logged_disconnected: set[int] = set()
 
     async def connect_all(self, log_fn=None):
         for i, config in enumerate(self.printer_configs):
@@ -55,14 +56,20 @@ class PrinterManager:
     async def reconnect_if_needed(self, log_fn=None):
         for i, printer in enumerate(self.printers):
             if printer and not printer.mqtt_client_connected():
-                msg = f'Printer {i + 1} not connected, reconnecting'
-                print(msg)
-                if log_fn:
-                    await log_fn(msg)
+                # Only log once per disconnect event
+                if i not in self._logged_disconnected:
+                    self._logged_disconnected.add(i)
+                    msg = f'Printer {i + 1} not connected, reconnecting'
+                    print(msg)
+                    if log_fn:
+                        await log_fn(msg)
                 try:
                     printer.connect()
                 except Exception as e:
                     print(f'Failed to reconnect printer {i + 1}: {e}')
+            elif printer and printer.mqtt_client_connected() and i in self._logged_disconnected:
+                # Printer reconnected, clear the flag
+                self._logged_disconnected.discard(i)
 
     def check_states(self) -> Generator[PrinterEvent, None, None]:
         for i, printer in enumerate(self.printers):
@@ -151,6 +158,7 @@ class PrinterManager:
 
         for i, printer in enumerate(self.printers):
             if not printer or not printer.mqtt_client_ready():
+                status_message += f'{i + 1}: Disconnected\n'
                 continue
 
             gcode_state = printer.get_state()
