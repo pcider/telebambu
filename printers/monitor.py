@@ -79,9 +79,5 @@ async def handle_event(event, message_service: MessageService):
         if layer == 2:
             await message_service.send_layer2_notification(i, printer.camera_client.last_frame)
 
-        # Check for custom layer notification
+        # Check for custom layer notification (handles both layer and percent notifications)
         await message_service.send_custom_layer_notification(i, layer, printer.camera_client.last_frame)
-
-        # Check for percentage notification
-        percent = printer.get_percentage()
-        await message_service.send_percent_notification(i, percent, printer.camera_client.last_frame)

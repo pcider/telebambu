@@ -19,8 +19,8 @@ class PrintSession:
     print_time: Optional[str] = None
     notify_layer: Optional[int] = None
     notify_layer_notified: bool = False
-    notify_percent: Optional[int] = None
-    notify_percent_notified: bool = False
+    notify_type: Optional[str] = None  # "layer" or "percent"
+    notify_original_value: Optional[int] = None  # original value for display
 
 
 @dataclass
@@ -124,30 +124,19 @@ class Storage:
             session.layer2_notified = True
             self._save()
 
-    def set_notify_layer(self, printer_index: int, layer: int):
+    def set_notify_layer(self, printer_index: int, layer: int, notify_type: str = "layer", original_value: int = None):
         session = self.active_prints.get(printer_index)
         if session:
             session.notify_layer = layer
             session.notify_layer_notified = False
+            session.notify_type = notify_type
+            session.notify_original_value = original_value if original_value is not None else layer
             self._save()
 
     def mark_notify_layer_notified(self, printer_index: int):
         session = self.active_prints.get(printer_index)
         if session:
             session.notify_layer_notified = True
-            self._save()
-
-    def set_notify_percent(self, printer_index: int, percent: int):
-        session = self.active_prints.get(printer_index)
-        if session:
-            session.notify_percent = percent
-            session.notify_percent_notified = False
-            self._save()
-
-    def mark_notify_percent_notified(self, printer_index: int):
-        session = self.active_prints.get(printer_index)
-        if session:
-            session.notify_percent_notified = True
             self._save()
 
     def end_print(self, printer_index: int) -> Optional[PrintSession]:
@@ -170,8 +159,8 @@ class Storage:
         session.layer2_notified = False
         session.notify_layer = None
         session.notify_layer_notified = False
-        session.notify_percent = None
-        session.notify_percent_notified = False
+        session.notify_type = None
+        session.notify_original_value = None
         self._save()
         return session
 

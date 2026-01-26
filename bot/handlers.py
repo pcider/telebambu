@@ -120,8 +120,25 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
                     await update.message.reply_text("Percentage must be between 1 and 100.")
                     return
 
-                storage.set_notify_percent(claimed_printer_index, percent)
-                await update.message.reply_text(f"You will be notified when {percent}% is reached on Printer {claimed_printer_index + 1}.")
+                # Get total layers to convert percent to layer
+                if not printer_manager:
+                    await update.message.reply_text("Printer manager not available.")
+                    return
+
+                printer = printer_manager.get_printer(claimed_printer_index)
+                if not printer or not printer.mqtt_client_ready():
+                    await update.message.reply_text(f"Printer {claimed_printer_index + 1} is not connected.")
+                    return
+
+                total_layers = printer.total_layer_num()
+                if total_layers <= 0:
+                    await update.message.reply_text("Cannot determine total layers for this print.")
+                    return
+
+                # Convert percent to target layer
+                target_layer = max(1, (percent * total_layers) // 100)
+                storage.set_notify_layer(claimed_printer_index, target_layer, notify_type="percent", original_value=percent)
+                await update.message.reply_text(f"You will be notified when {percent}% is reached (layer {target_layer}/{total_layers}) on Printer {claimed_printer_index + 1}.")
 
             except ValueError:
                 await update.message.reply_text("Please provide a valid percentage.")
@@ -132,7 +149,7 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
                     await update.message.reply_text("Layer must be a positive number.")
                     return
 
-                storage.set_notify_layer(claimed_printer_index, layer)
+                storage.set_notify_layer(claimed_printer_index, layer, notify_type="layer", original_value=layer)
                 await update.message.reply_text(f"You will be notified when layer {layer} is reached on Printer {claimed_printer_index + 1}.")
 
             except ValueError:
@@ -182,10 +199,10 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
         )
 
         if session.notify_layer and not session.notify_layer_notified:
-            info_text += f"- Layer notification: {session.notify_layer}\n"
-
-        if session.notify_percent and not session.notify_percent_notified:
-            info_text += f"- Percent notification: {session.notify_percent}%\n"
+            if session.notify_type == "percent":
+                info_text += f"- Notification: {session.notify_original_value}% (layer {session.notify_layer})\n"
+            else:
+                info_text += f"- Notification: layer {session.notify_layer}\n"
 
         await update.message.reply_text(info_text)
 

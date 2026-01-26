@@ -149,7 +149,12 @@ class MessageService:
         if isinstance(image, bytearray):
             image = bytes(image)
 
-        message = f"Printer {printer_index + 1}: Layer {session.notify_layer} reached!"
+        # Show message based on notification type
+        if session.notify_type == "percent":
+            message = f"Printer {printer_index + 1}: {session.notify_original_value}% reached!"
+        else:
+            message = f"Printer {printer_index + 1}: Layer {session.notify_layer} reached!"
+
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("Unclaim Print", callback_data=f"unclaim_{printer_index}")]
         ])
@@ -169,41 +174,6 @@ class MessageService:
             )
 
         self.storage.mark_notify_layer_notified(printer_index)
-
-    async def send_percent_notification(self, printer_index: int, current_percent: int, image: bytes | bytearray | None = None):
-        session = self.storage.get_print(printer_index)
-        if not session or not session.claimed_by:
-            return
-
-        if not session.notify_percent or session.notify_percent_notified:
-            return
-
-        if current_percent < session.notify_percent:
-            return
-
-        if isinstance(image, bytearray):
-            image = bytes(image)
-
-        message = f"Printer {printer_index + 1}: {session.notify_percent}% reached!"
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Unclaim Print", callback_data=f"unclaim_{printer_index}")]
-        ])
-
-        if image:
-            await self.bot.send_photo(
-                chat_id=session.claimed_by,
-                photo=InputFile(image),
-                caption=message,
-                reply_markup=keyboard
-            )
-        else:
-            await self.bot.send_message(
-                chat_id=session.claimed_by,
-                text=message,
-                reply_markup=keyboard
-            )
-
-        self.storage.mark_notify_percent_notified(printer_index)
 
     async def send_update_message(self, message: str, image: bytes | bytearray | None = None):
         if isinstance(image, bytearray):
