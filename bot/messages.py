@@ -193,10 +193,10 @@ class MessageService:
                 message_thread_id=self.ctx.thread_id
             )
 
-    async def log_message(self, message: str, image: bytes | bytearray | None = None):
+    async def log_message(self, message: str, image: bytes | bytearray | None = None, stdout_only: bool = False):
         print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {message}')
 
-        if not self.ctx.log_chat_id:
+        if stdout_only or not self.ctx.log_chat_id:
             return
 
         cur_time = time.time()

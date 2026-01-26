@@ -5,6 +5,44 @@ from data import Storage
 import config as cfg
 
 
+def _get_claimed_printers(storage: Storage, user_id: int) -> list[int]:
+    """Get list of printer indices claimed by a user."""
+    return [idx for idx, session in storage.active_prints.items() if session.claimed_by == user_id]
+
+
+def _resolve_printer(storage: Storage, user_id: int, args: list, require_claim: bool = True) -> tuple[int | None, str | None]:
+    """
+    Resolve which printer to use based on user's claimed printers and optional argument.
+    Returns (printer_index, error_message). If error_message is set, printer_index is None.
+    """
+    claimed = _get_claimed_printers(storage, user_id)
+
+    if require_claim and not claimed:
+        return None, "You don't have an active print claimed."
+
+    # If printer number provided as argument
+    if args:
+        try:
+            printer_num = int(args[0])
+            printer_index = printer_num - 1
+            if printer_index < 0 or printer_index >= len(cfg.PRINTERS):
+                return None, f"Invalid printer number. Use 1-{len(cfg.PRINTERS)}"
+            if require_claim and printer_index not in claimed:
+                return None, f"You haven't claimed Printer {printer_num}."
+            return printer_index, None
+        except ValueError:
+            return None, None  # Not a number, might be another argument
+
+    # No argument provided
+    if len(claimed) == 1:
+        return claimed[0], None
+    elif len(claimed) > 1:
+        printer_list = ", ".join(str(idx + 1) for idx in claimed)
+        return None, f"You have multiple prints claimed ({printer_list}). Please specify the printer number."
+
+    return None, "You don't have an active print claimed."
+
+
 def setup_handlers(app: Application, storage: Storage, message_service, printer_manager=None):
     async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -21,12 +59,14 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
             await handle_layer2_toggle(query, user, storage)
         elif data.startswith("unclaim_"):
             await handle_unclaim_callback(query, user, storage, context)
+        elif data.startswith("restart_printer_"):
+            await handle_restart_printer(query, user, printer_manager)
         elif data == "help":
             await handle_help_callback(query)
 
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    # /camera command - owner has full access, claimers can access their printer
+    # /camera command - owner has full access, claimers can access their printers
     async def handle_camera(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         is_owner = user_id == cfg.OWNER_ID
@@ -35,25 +75,22 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
             await update.message.reply_text("Printer manager not available.")
             return
 
-        # Find which printer this user has claimed (if any)
-        claimed_printer_index = None
-        for idx, session in storage.active_prints.items():
-            if session.claimed_by == user_id:
-                claimed_printer_index = idx
-                break
+        claimed = _get_claimed_printers(storage, user_id)
 
-        if not is_owner and claimed_printer_index is None:
+        if not is_owner and not claimed:
             await update.message.reply_text("You don't have access to any printer camera.")
             return
 
         if not context.args:
-            if claimed_printer_index is not None:
-                # Default to user's claimed printer
-                printer_index = claimed_printer_index
-                printer_num = printer_index + 1
+            if len(claimed) == 1:
+                printer_index = claimed[0]
+            elif len(claimed) > 1:
+                printer_list = ", ".join(str(idx + 1) for idx in claimed)
+                await update.message.reply_text(f"You have multiple prints claimed ({printer_list}). Usage: /camera <printer>")
+                return
             elif is_owner:
                 await update.message.reply_text(
-                    f"Usage: /camera [printer]\n"
+                    f"Usage: /camera <printer>\n"
                     f"Available printers: 1-{len(cfg.PRINTERS)}"
                 )
                 return
@@ -68,25 +105,24 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
                 await update.message.reply_text("Please provide a valid printer number.")
                 return
 
-        if printer_index < 0 or printer_index >= len(cfg.PRINTERS):
-            await update.message.reply_text(f"Invalid printer number. Use 1-{len(cfg.PRINTERS)}")
-            return
+            if printer_index < 0 or printer_index >= len(cfg.PRINTERS):
+                await update.message.reply_text(f"Invalid printer number. Use 1-{len(cfg.PRINTERS)}")
+                return
 
-        # Check permission: owner can access all, claimers only their printer
-        if not is_owner and printer_index != claimed_printer_index:
-            await update.message.reply_text(
-                f"You only have access to Printer {claimed_printer_index + 1} while your print is active."
-            )
-            return
+            # Check permission: owner can access all, claimers only their printers
+            if not is_owner and printer_index not in claimed:
+                claimed_list = ", ".join(str(idx + 1) for idx in claimed)
+                await update.message.reply_text(f"You only have access to Printer(s) {claimed_list}.")
+                return
 
         frame = printer_manager.get_camera_frame(printer_index)
         if not frame:
-            await update.message.reply_text(f"Printer {printer_num} is not connected or has no camera frame.")
+            await update.message.reply_text(f"Printer {printer_index + 1} is not connected or has no camera frame.")
             return
 
         await update.message.reply_photo(
-            photo=InputFile(frame, filename=f"printer_{printer_num}.jpg"),
-            caption=f"Camera image from Printer {printer_num}"
+            photo=InputFile(frame, filename=f"printer_{printer_index + 1}.jpg"),
+            caption=f"Camera image from Printer {printer_index + 1}"
         )
 
     app.add_handler(CommandHandler("camera", handle_camera))
@@ -94,23 +130,44 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
     # /notify command - set a layer or percentage to be notified at
     async def handle_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        claimed = _get_claimed_printers(storage, user_id)
 
-        # Find which printer this user has claimed
-        claimed_printer_index = None
-        for idx, session in storage.active_prints.items():
-            if session.claimed_by == user_id:
-                claimed_printer_index = idx
-                break
-
-        if claimed_printer_index is None:
+        if not claimed:
             await update.message.reply_text("You don't have an active print claimed.")
             return
 
         if not context.args:
-            await update.message.reply_text("Usage: /notify <layer> or /notify <percent>%\nExamples: /notify 50 or /notify 75%")
+            await update.message.reply_text("Usage: /notify [printer] <layer> or /notify [printer] <percent>%\nExamples: /notify 50 or /notify 2 75%")
             return
 
-        arg = context.args[0]
+        # Determine printer index and notification value
+        args = list(context.args)
+        printer_index = None
+
+        # Check if first arg is a printer number
+        if len(args) >= 2:
+            try:
+                maybe_printer = int(args[0])
+                if 1 <= maybe_printer <= len(cfg.PRINTERS) and (maybe_printer - 1) in claimed:
+                    printer_index = maybe_printer - 1
+                    args = args[1:]  # Remove printer arg
+            except ValueError:
+                pass
+
+        # If no printer specified, resolve from claimed
+        if printer_index is None:
+            if len(claimed) == 1:
+                printer_index = claimed[0]
+            else:
+                printer_list = ", ".join(str(idx + 1) for idx in claimed)
+                await update.message.reply_text(f"You have multiple prints claimed ({printer_list}). Usage: /notify <printer> <layer|percent%>")
+                return
+
+        if not args:
+            await update.message.reply_text("Usage: /notify [printer] <layer> or /notify [printer] <percent>%")
+            return
+
+        arg = args[0]
 
         # Check if it's a percentage
         if arg.endswith('%'):
@@ -125,9 +182,9 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
                     await update.message.reply_text("Printer manager not available.")
                     return
 
-                printer = printer_manager.get_printer(claimed_printer_index)
+                printer = printer_manager.get_printer(printer_index)
                 if not printer or not printer.mqtt_client_ready():
-                    await update.message.reply_text(f"Printer {claimed_printer_index + 1} is not connected.")
+                    await update.message.reply_text(f"Printer {printer_index + 1} is not connected.")
                     return
 
                 total_layers = printer.total_layer_num()
@@ -137,8 +194,8 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
 
                 # Convert percent to target layer
                 target_layer = max(1, (percent * total_layers) // 100)
-                storage.set_notify_layer(claimed_printer_index, target_layer, notify_type="percent", original_value=percent)
-                await update.message.reply_text(f"You will be notified when {percent}% is reached (layer {target_layer}/{total_layers}) on Printer {claimed_printer_index + 1}.")
+                storage.set_notify_layer(printer_index, target_layer, notify_type="percent", original_value=percent)
+                await update.message.reply_text(f"You will be notified when {percent}% is reached (layer {target_layer}/{total_layers}) on Printer {printer_index + 1}.")
 
             except ValueError:
                 await update.message.reply_text("Please provide a valid percentage.")
@@ -149,8 +206,8 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
                     await update.message.reply_text("Layer must be a positive number.")
                     return
 
-                storage.set_notify_layer(claimed_printer_index, layer, notify_type="layer", original_value=layer)
-                await update.message.reply_text(f"You will be notified when layer {layer} is reached on Printer {claimed_printer_index + 1}.")
+                storage.set_notify_layer(printer_index, layer, notify_type="layer", original_value=layer)
+                await update.message.reply_text(f"You will be notified when layer {layer} is reached on Printer {printer_index + 1}.")
 
             except ValueError:
                 await update.message.reply_text("Please provide a valid layer number or percentage.")
@@ -160,27 +217,27 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
     # /info command - show info about user's current print
     async def handle_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        claimed = _get_claimed_printers(storage, user_id)
 
-        # Find which printer this user has claimed
-        claimed_printer_index = None
-        session = None
-        for idx, s in storage.active_prints.items():
-            if s.claimed_by == user_id:
-                claimed_printer_index = idx
-                session = s
-                break
-
-        if claimed_printer_index is None:
+        if not claimed:
             await update.message.reply_text("You don't have an active print claimed.")
             return
+
+        # Resolve printer from args or single claim
+        printer_index, error = _resolve_printer(storage, user_id, context.args)
+        if error:
+            await update.message.reply_text(error)
+            return
+
+        session = storage.get_print(printer_index)
 
         if not printer_manager:
             await update.message.reply_text("Printer manager not available.")
             return
 
-        printer = printer_manager.get_printer(claimed_printer_index)
+        printer = printer_manager.get_printer(printer_index)
         if not printer or not printer.mqtt_client_ready():
-            await update.message.reply_text(f"Printer {claimed_printer_index + 1} is not connected.")
+            await update.message.reply_text(f"Printer {printer_index + 1} is not connected.")
             return
 
         # Gather print info
@@ -191,14 +248,14 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
         gcode_state = printer.get_state()
 
         info_text = (
-            f"Printer {claimed_printer_index + 1} Info:\n"
+            f"Printer {printer_index + 1} Info:\n"
             f"- Status: {gcode_state}\n"
             f"- Progress: {progress}%\n"
             f"- Time remaining: {time_left}\n"
             f"- Layer: {current_layer}/{total_layers}\n"
         )
 
-        if session.notify_layer and not session.notify_layer_notified:
+        if session and session.notify_layer and not session.notify_layer_notified:
             if session.notify_type == "percent":
                 info_text += f"- Notification: {session.notify_original_value}% (layer {session.notify_layer})\n"
             else:
@@ -212,17 +269,15 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
     async def handle_unclaim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
 
-        # Find which printer this user has claimed
-        claimed_printer_index = None
-        session = None
-        for idx, s in storage.active_prints.items():
-            if s.claimed_by == user_id:
-                claimed_printer_index = idx
-                session = s
-                break
+        # Resolve printer from args or single claim
+        printer_index, error = _resolve_printer(storage, user_id, context.args)
+        if error:
+            await update.message.reply_text(error)
+            return
 
-        if claimed_printer_index is None:
-            await update.message.reply_text("You don't have an active print claimed.")
+        session = storage.get_print(printer_index)
+        if not session:
+            await update.message.reply_text("This print session has ended.")
             return
 
         # Store message info before unclaiming
@@ -231,15 +286,15 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
         print_time = session.print_time
 
         # Unclaim the print
-        storage.unclaim_print(claimed_printer_index)
+        storage.unclaim_print(printer_index)
 
         # Restore the main chat message with the Claim Print button
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Claim Print", callback_data=f"claim_{claimed_printer_index}")]
+            [InlineKeyboardButton("Claim Print", callback_data=f"claim_{printer_index}")]
         ])
 
         print_time_str = f" (print time: {print_time})" if print_time else ""
-        message = f"Printer {claimed_printer_index + 1} has started printing.{print_time_str}"
+        message = f"Printer {printer_index + 1} has started printing.{print_time_str}"
 
         try:
             await context.bot.edit_message_text(
@@ -248,9 +303,9 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
                 text=message,
                 reply_markup=keyboard
             )
-            await update.message.reply_text(f"You have unclaimed Printer {claimed_printer_index + 1}.")
-        except Exception as e:
-            await update.message.reply_text(f"Unclaimed Printer {claimed_printer_index + 1}, but could not update the main chat message.")
+            await update.message.reply_text(f"You have unclaimed Printer {printer_index + 1}.")
+        except Exception:
+            await update.message.reply_text(f"Unclaimed Printer {printer_index + 1}, but could not update the main chat message.")
 
     app.add_handler(CommandHandler("unclaim", handle_unclaim))
 
@@ -259,11 +314,12 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
         help_text = (
             "Available commands:\n"
             "/help - Show this help message\n"
-            "/info - Show info about your current print\n"
-            "/notify <layer> - Get notified at a specific layer\n"
-            "/notify <percent>% - Get notified at a percentage (e.g. /notify 75%)\n"
-            "/camera - View camera image from your printer\n"
-            "/unclaim - Unclaim your current print"
+            "/info [printer] - Show info about your print\n"
+            "/notify [printer] <layer> - Get notified at a specific layer\n"
+            "/notify [printer] <percent>% - Get notified at a percentage\n"
+            "/camera [printer] - View camera image from your printer\n"
+            "/unclaim [printer] - Unclaim your print\n\n"
+            "Note: [printer] is required when you have multiple prints claimed."
         )
         await update.message.reply_text(help_text)
 
@@ -507,11 +563,37 @@ async def handle_help_callback(query):
     help_text = (
         "Available commands:\n"
         "/help - Show this help message\n"
-        "/info - Show info about your current print\n"
-        "/notify <layer> - Get notified at a specific layer\n"
-        "/notify <percent>% - Get notified at a percentage (e.g. /notify 75%)\n"
-        "/camera - View camera image from your printer\n"
-        "/unclaim - Unclaim your current print"
+        "/info [printer] - Show info about your print\n"
+        "/notify [printer] <layer> - Get notified at a specific layer\n"
+        "/notify [printer] <percent>% - Get notified at a percentage\n"
+        "/camera [printer] - View camera image from your printer\n"
+        "/unclaim [printer] - Unclaim your print\n\n"
+        "Note: [printer] is required when you have multiple prints claimed."
     )
     await query.answer()
     await query.message.reply_text(help_text)
+
+
+async def handle_restart_printer(query, user, printer_manager):
+    """Handle restart printer button callback (owner only)."""
+    if user.id != cfg.OWNER_ID:
+        await query.answer("Only the owner can restart printers.", show_alert=True)
+        return
+
+    printer_index = int(query.data.split("_")[2])
+
+    if not printer_manager:
+        await query.edit_message_text("Printer manager not available.")
+        return
+
+    printer = printer_manager.get_printer(printer_index)
+    if not printer:
+        await query.edit_message_text(f"Printer {printer_index + 1} not found.")
+        return
+
+    try:
+        printer.disconnect()
+        printer.connect()
+        await query.edit_message_text(f"Printer {printer_index + 1} reconnection initiated.")
+    except Exception as e:
+        await query.edit_message_text(f"Failed to restart Printer {printer_index + 1}: {e}")
