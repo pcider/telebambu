@@ -1,9 +1,19 @@
 import time
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from dataclasses import dataclass
+
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMediaPhoto
 from telegram.constants import ParseMode
 
 from data import Storage
 from .telegram_bot import BotContext
+
+
+@dataclass
+class LivestreamInfo:
+    message_id: int
+    chat_id: int
+    printer_index: int
+    last_update: float = 0
 
 
 class MessageService:
@@ -14,6 +24,8 @@ class MessageService:
         self._prev_status_message = ''
         self._last_log_time = 0
         self._message_buffer = ''
+        # Track active livestream per printer: printer_index -> LivestreamInfo
+        self._active_livestreams: dict[int, LivestreamInfo] = {}
 
     def format_print_time(self, total_mins: int) -> str:
         hrs = total_mins // 60
@@ -255,3 +267,64 @@ class MessageService:
                 #     parse_mode=ParseMode.MARKDOWN_V2
                 # )
                 # self.storage.set_status_message_id(msg.message_id)
+
+    async def start_livestream(self, printer_index: int, chat_id: int, image: bytes) -> int:
+        """Start a new livestream for a printer. Returns the message ID."""
+        # Stop any existing livestream for this printer
+        await self.stop_livestream(printer_index)
+
+        caption = f"Printer {printer_index + 1} Livestream\nUpdated: {time.strftime('%H:%M:%S')}"
+        msg = await self.bot.send_photo(
+            chat_id=chat_id,
+            photo=InputFile(image, filename=f"livestream_{printer_index + 1}.jpg"),
+            caption=caption
+        )
+
+        self._active_livestreams[printer_index] = LivestreamInfo(
+            message_id=msg.message_id,
+            chat_id=chat_id,
+            printer_index=printer_index,
+            last_update=time.time()
+        )
+
+        return msg.message_id
+
+    async def stop_livestream(self, printer_index: int):
+        """Stop the livestream for a printer and update its caption."""
+        if printer_index not in self._active_livestreams:
+            return
+
+        info = self._active_livestreams.pop(printer_index)
+        try:
+            await self.bot.edit_message_caption(
+                chat_id=info.chat_id,
+                message_id=info.message_id,
+                caption=f"Printer {printer_index + 1} Livestream\nStopped at {time.strftime('%H:%M:%S')}"
+            )
+        except Exception:
+            pass  # Message may have been deleted
+
+    async def update_livestreams(self, get_frame_fn):
+        """Update all active livestreams with new images."""
+        for printer_index, info in list(self._active_livestreams.items()):
+            frame = get_frame_fn(printer_index)
+            if not frame:
+                continue
+
+            if isinstance(frame, bytearray):
+                frame = bytes(frame)
+
+            try:
+                caption = f"Printer {printer_index + 1} Livestream\nUpdated: {time.strftime('%H:%M:%S')}"
+                await self.bot.edit_message_media(
+                    chat_id=info.chat_id,
+                    message_id=info.message_id,
+                    media=InputMediaPhoto(media=frame, caption=caption)
+                )
+                info.last_update = time.time()
+            except Exception:
+                # Message may have been deleted, remove from tracking
+                self._active_livestreams.pop(printer_index, None)
+
+    def has_active_livestream(self, printer_index: int) -> bool:
+        return printer_index in self._active_livestreams

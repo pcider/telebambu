@@ -127,6 +127,65 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
 
     app.add_handler(CommandHandler("camera", handle_camera))
 
+    # /livestream command - start a livestream for a claimed printer (owner can access all)
+    async def handle_livestream(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        is_owner = user_id == cfg.OWNER_ID
+        claimed = _get_claimed_printers(storage, user_id)
+
+        if not is_owner and not claimed:
+            await update.message.reply_text("You don't have an active print claimed.")
+            return
+
+        if not printer_manager:
+            await update.message.reply_text("Printer manager not available.")
+            return
+
+        # Resolve printer - owner can access any, claimers only their own
+        if not context.args:
+            if len(claimed) == 1:
+                printer_index = claimed[0]
+            elif len(claimed) > 1:
+                printer_list = ", ".join(str(idx + 1) for idx in claimed)
+                await update.message.reply_text(f"You have multiple prints claimed ({printer_list}). Usage: /livestream <printer>")
+                return
+            elif is_owner:
+                await update.message.reply_text(
+                    f"Usage: /livestream <printer>\n"
+                    f"Available printers: 1-{len(cfg.PRINTERS)}"
+                )
+                return
+            else:
+                await update.message.reply_text("You don't have an active print claimed.")
+                return
+        else:
+            try:
+                printer_num = int(context.args[0])
+                printer_index = printer_num - 1
+            except ValueError:
+                await update.message.reply_text("Please provide a valid printer number.")
+                return
+
+            if printer_index < 0 or printer_index >= len(cfg.PRINTERS):
+                await update.message.reply_text(f"Invalid printer number. Use 1-{len(cfg.PRINTERS)}")
+                return
+
+            # Check permission: owner can access all, claimers only their printers
+            if not is_owner and printer_index not in claimed:
+                claimed_list = ", ".join(str(idx + 1) for idx in claimed)
+                await update.message.reply_text(f"You only have access to Printer(s) {claimed_list}.")
+                return
+
+        frame = printer_manager.get_camera_frame(printer_index)
+        if not frame:
+            await update.message.reply_text(f"Printer {printer_index + 1} is not connected or has no camera frame.")
+            return
+
+        # Start the livestream (this will stop any existing one for this printer)
+        await message_service.start_livestream(printer_index, update.effective_chat.id, frame)
+
+    app.add_handler(CommandHandler("livestream", handle_livestream))
+
     # /notify command - set a layer or percentage to be notified at
     async def handle_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -318,6 +377,7 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
             "/notify [printer] <layer> - Get notified at a specific layer\n"
             "/notify [printer] <percent>% - Get notified at a percentage\n"
             "/camera [printer] - View camera image from your printer\n"
+            "/livestream [printer] - Start a live updating camera feed\n"
             "/unclaim [printer] - Unclaim your print\n\n"
             "Note: [printer] is required when you have multiple prints claimed."
         )
@@ -567,6 +627,7 @@ async def handle_help_callback(query):
         "/notify [printer] <layer> - Get notified at a specific layer\n"
         "/notify [printer] <percent>% - Get notified at a percentage\n"
         "/camera [printer] - View camera image from your printer\n"
+        "/livestream [printer] - Start a live updating camera feed\n"
         "/unclaim [printer] - Unclaim your print\n\n"
         "Note: [printer] is required when you have multiple prints claimed."
     )
