@@ -155,14 +155,24 @@ class PrinterManager:
 
     def get_status_text(self) -> str:
         status_message = 'Printer Statuses:```c\n'
+        offline_printers = []
+        stale_camera_printers = []
 
         for i, printer in enumerate(self.printers):
             if not printer or not printer.mqtt_client_ready():
-                status_message += f'{i + 1}: Disconnected\n'
+                status_message += f'{i + 1}: OFFLINE\n'
+                offline_printers.append(i + 1)
                 continue
 
             gcode_state = printer.get_state()
             print_state = printer.get_current_state()
+
+            # Check for stale camera
+            has_frame = printer.camera_client.last_frame is not None
+            camera_indicator = '' if has_frame else ' [NO CAM]'
+
+            if not has_frame:
+                stale_camera_printers.append(i + 1)
 
             status_message += f'{i + 1}: {gcode_state} ({print_state}'
 
@@ -173,7 +183,7 @@ class PrinterManager:
                 total_layers = printer.total_layer_num()
                 status_message += f', {progress}% done, {time_left} left, L:{layer}/{total_layers}'
 
-            status_message += ')\n'
+            status_message += f'){camera_indicator}\n'
 
         status_message += 'Note: "FINISH/IDLE" means not in use\n'
         status_message += f'Updated on: {time.strftime("%Y-%m-%d %H:%M")}\n'

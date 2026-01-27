@@ -385,6 +385,118 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
 
     app.add_handler(CommandHandler("help", handle_help))
 
+    # /restart command - owner only, restart printer connection
+    async def handle_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+
+        if user_id != cfg.OWNER_ID:
+            await update.message.reply_text("Only the bot owner can use this command.")
+            return
+
+        if not printer_manager:
+            await update.message.reply_text("Printer manager not available.")
+            return
+
+        if not context.args:
+            await update.message.reply_text(
+                f"Usage: /restart <printer>\n"
+                f"Available printers: 1-{len(cfg.PRINTERS)}"
+            )
+            return
+
+        try:
+            printer_num = int(context.args[0])
+            printer_index = printer_num - 1
+        except ValueError:
+            await update.message.reply_text("Please provide a valid printer number.")
+            return
+
+        if printer_index < 0 or printer_index >= len(cfg.PRINTERS):
+            await update.message.reply_text(f"Invalid printer number. Use 1-{len(cfg.PRINTERS)}")
+            return
+
+        printer = printer_manager.get_printer(printer_index)
+        if not printer:
+            await update.message.reply_text(f"Printer {printer_num} not found.")
+            return
+
+        try:
+            printer.disconnect()
+            printer.connect()
+            await update.message.reply_text(f"Printer {printer_num} reconnection initiated.")
+        except Exception as e:
+            await update.message.reply_text(f"Failed to restart Printer {printer_num}: {e}")
+
+    app.add_handler(CommandHandler("restart", handle_restart))
+
+    # /light command - toggle printer light (owner or claimer)
+    async def handle_light(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        is_owner = user_id == cfg.OWNER_ID
+        claimed = _get_claimed_printers(storage, user_id)
+
+        if not is_owner and not claimed:
+            await update.message.reply_text("You don't have an active print claimed.")
+            return
+
+        if not printer_manager:
+            await update.message.reply_text("Printer manager not available.")
+            return
+
+        # Resolve printer - owner can access any, claimers only their own
+        if not context.args:
+            if len(claimed) == 1:
+                printer_index = claimed[0]
+            elif len(claimed) > 1:
+                printer_list = ", ".join(str(idx + 1) for idx in claimed)
+                await update.message.reply_text(f"You have multiple prints claimed ({printer_list}). Usage: /light <printer>")
+                return
+            elif is_owner:
+                await update.message.reply_text(
+                    f"Usage: /light <printer>\n"
+                    f"Available printers: 1-{len(cfg.PRINTERS)}"
+                )
+                return
+            else:
+                await update.message.reply_text("You don't have an active print claimed.")
+                return
+        else:
+            try:
+                printer_num = int(context.args[0])
+                printer_index = printer_num - 1
+            except ValueError:
+                await update.message.reply_text("Please provide a valid printer number.")
+                return
+
+            if printer_index < 0 or printer_index >= len(cfg.PRINTERS):
+                await update.message.reply_text(f"Invalid printer number. Use 1-{len(cfg.PRINTERS)}")
+                return
+
+            # Check permission: owner can access all, claimers only their printers
+            if not is_owner and printer_index not in claimed:
+                claimed_list = ", ".join(str(idx + 1) for idx in claimed)
+                await update.message.reply_text(f"You only have access to Printer(s) {claimed_list}.")
+                return
+
+        printer = printer_manager.get_printer(printer_index)
+        if not printer or not printer.mqtt_client_ready():
+            await update.message.reply_text(f"Printer {printer_index + 1} is not connected.")
+            return
+
+        try:
+            # Toggle light - check current state and flip it
+            current_state = printer.get_light_state()
+            if current_state:
+                printer.turn_light_off()
+                await update.message.reply_text(f"Printer {printer_index + 1} light turned OFF.")
+            else:
+                printer.turn_light_on()
+                await update.message.reply_text(f"Printer {printer_index + 1} light turned ON.")
+        except Exception as e:
+            await update.message.reply_text(f"Failed to toggle light: {e}")
+
+    app.add_handler(CommandHandler("light", handle_light))
+
     # /start command - handles deep links from "Start DM with bot" button
     async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
