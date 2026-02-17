@@ -1,19 +1,26 @@
+import asyncio
+import json
+import os
 import time
-from dataclasses import dataclass
-
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMediaPhoto
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.constants import ParseMode
 
 from data import Storage
 from .telegram_bot import BotContext
+import config as cfg
+
+# Load error codes from JSON
+_ERROR_CODES_FILE = os.path.join(os.path.dirname(__file__), '..', 'error_codes.json')
+with open(_ERROR_CODES_FILE, 'r') as _f:
+    ERROR_CODES: dict[str, str] = json.load(_f)
 
 
-@dataclass
-class LivestreamInfo:
-    message_id: int
-    chat_id: int
-    printer_index: int
-    last_update: float = 0
+def lookup_error(code) -> str:
+    """Look up an error code and return a human-readable description."""
+    if code is None:
+        return "Unknown error"
+    hex_code = f"{code:08X}" if isinstance(code, int) else str(code).replace("-", "").replace(" ", "")
+    return ERROR_CODES.get(hex_code, f"Unknown error (code: {hex_code})")
 
 
 class MessageService:
@@ -24,8 +31,6 @@ class MessageService:
         self._prev_status_message = ''
         self._last_log_time = 0
         self._message_buffer = ''
-        # Track active livestream per printer: printer_index -> LivestreamInfo
-        self._active_livestreams: dict[int, LivestreamInfo] = {}
 
     def format_print_time(self, total_mins: int) -> str:
         hrs = total_mins // 60
@@ -187,6 +192,90 @@ class MessageService:
 
         self.storage.mark_notify_layer_notified(printer_index)
 
+    async def send_print_failed(self, printer_index: int, error_code, image: bytes | bytearray | None = None):
+        """Send print failure notification to the print owner (if claimed) and bot owner.
+        Deletes the 'started printing' message and cleans up the session."""
+        if isinstance(image, bytearray):
+            image = bytes(image)
+
+        session = self.storage.get_print(printer_index)
+        error_desc = lookup_error(error_code)
+        message = f"Printer {printer_index + 1} failed!\n{error_desc}"
+
+        # Delete the "started printing" message
+        if session:
+            try:
+                await self.bot.delete_message(
+                    chat_id=session.chat_id,
+                    message_id=session.message_id
+                )
+            except Exception:
+                pass
+
+        sent_messages = []
+
+        # Notify the print owner (claimer) based on their DM preference
+        if session and session.claimed_by:
+            try:
+                if session.dm_preference == "dm":
+                    target_chat = session.claimed_by
+                    thread_id = None
+                else:
+                    target_chat = self.ctx.chat_id
+                    thread_id = self.ctx.thread_id
+
+                if image:
+                    msg = await self.bot.send_photo(
+                        chat_id=target_chat,
+                        photo=InputFile(image),
+                        caption=message,
+                        message_thread_id=thread_id
+                    )
+                else:
+                    msg = await self.bot.send_message(
+                        chat_id=target_chat,
+                        text=message,
+                        message_thread_id=thread_id
+                    )
+                sent_messages.append((target_chat, msg.message_id))
+            except Exception as e:
+                print(f'Failed to send fail notification to claimer: {e}')
+
+        # Always notify the bot owner
+        owner_id = cfg.OWNER_ID
+        # Avoid double-sending if the claimer is the owner
+        if not (session and session.claimed_by == owner_id):
+            try:
+                if image:
+                    msg = await self.bot.send_photo(
+                        chat_id=owner_id,
+                        photo=InputFile(image),
+                        caption=message
+                    )
+                else:
+                    msg = await self.bot.send_message(
+                        chat_id=owner_id,
+                        text=message
+                    )
+                sent_messages.append((owner_id, msg.message_id))
+            except Exception as e:
+                print(f'Failed to send fail notification to owner: {e}')
+
+        # End the print session
+        if session:
+            self.storage.end_print(printer_index)
+
+        # Delete fail messages after a delay so users can read them
+        async def _delete_later():
+            await asyncio.sleep(60*60*24)  # 1 day
+            for chat_id, msg_id in sent_messages:
+                try:
+                    await self.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                except Exception:
+                    pass
+
+        asyncio.create_task(_delete_later())
+
     async def send_update_message(self, message: str, image: bytes | bytearray | None = None):
         if isinstance(image, bytearray):
             image = bytes(image)
@@ -268,63 +357,3 @@ class MessageService:
                 # )
                 # self.storage.set_status_message_id(msg.message_id)
 
-    async def start_livestream(self, printer_index: int, chat_id: int, image: bytes) -> int:
-        """Start a new livestream for a printer. Returns the message ID."""
-        # Stop any existing livestream for this printer
-        await self.stop_livestream(printer_index)
-
-        caption = f"Printer {printer_index + 1} Livestream\nUpdated: {time.strftime('%H:%M:%S')}"
-        msg = await self.bot.send_photo(
-            chat_id=chat_id,
-            photo=InputFile(image, filename=f"livestream_{printer_index + 1}.jpg"),
-            caption=caption
-        )
-
-        self._active_livestreams[printer_index] = LivestreamInfo(
-            message_id=msg.message_id,
-            chat_id=chat_id,
-            printer_index=printer_index,
-            last_update=time.time()
-        )
-
-        return msg.message_id
-
-    async def stop_livestream(self, printer_index: int):
-        """Stop the livestream for a printer and update its caption."""
-        if printer_index not in self._active_livestreams:
-            return
-
-        info = self._active_livestreams.pop(printer_index)
-        try:
-            await self.bot.edit_message_caption(
-                chat_id=info.chat_id,
-                message_id=info.message_id,
-                caption=f"Printer {printer_index + 1} Livestream\nStopped at {time.strftime('%H:%M:%S')}"
-            )
-        except Exception:
-            pass  # Message may have been deleted
-
-    async def update_livestreams(self, get_frame_fn):
-        """Update all active livestreams with new images."""
-        for printer_index, info in list(self._active_livestreams.items()):
-            frame = get_frame_fn(printer_index)
-            if not frame:
-                continue
-
-            if isinstance(frame, bytearray):
-                frame = bytes(frame)
-
-            try:
-                caption = f"Printer {printer_index + 1} Livestream\nUpdated: {time.strftime('%H:%M:%S')}"
-                await self.bot.edit_message_media(
-                    chat_id=info.chat_id,
-                    message_id=info.message_id,
-                    media=InputMediaPhoto(media=frame, caption=caption)
-                )
-                info.last_update = time.time()
-            except Exception:
-                # Message may have been deleted, remove from tracking
-                self._active_livestreams.pop(printer_index, None)
-
-    def has_active_livestream(self, printer_index: int) -> bool:
-        return printer_index in self._active_livestreams

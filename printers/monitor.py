@@ -1,5 +1,4 @@
 import asyncio
-import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from bambulabs_api import GcodeState
@@ -10,7 +9,6 @@ import config as cfg
 
 # Track which printers have been reported as stale to avoid spam
 _stale_camera_reported: set[int] = set()
-_last_livestream_update: float = 0
 
 
 async def monitor_loop(printer_manager: PrinterManager, message_service: MessageService):
@@ -29,9 +27,6 @@ async def monitor_loop(printer_manager: PrinterManager, message_service: Message
 
         # Check for stale cameras on idle printers
         await check_stale_cameras(printer_manager, message_service)
-
-        # Update livestreams
-        await update_livestreams(printer_manager, message_service)
 
         # Process printer events
         for event in printer_manager.check_states():
@@ -65,18 +60,6 @@ async def check_stale_cameras(printer_manager: PrinterManager, message_service: 
         elif has_frame and i in _stale_camera_reported:
             # Camera recovered, clear the flag
             _stale_camera_reported.discard(i)
-
-
-async def update_livestreams(printer_manager: PrinterManager, message_service: MessageService):
-    """Update all active livestreams at the configured interval."""
-    global _last_livestream_update
-
-    now = time.time()
-    if now - _last_livestream_update < cfg.LIVESTREAM_INTERVAL:
-        return
-
-    _last_livestream_update = now
-    await message_service.update_livestreams(printer_manager.get_camera_frame)
 
 
 async def handle_event(event, message_service: MessageService):
@@ -118,10 +101,7 @@ async def handle_event(event, message_service: MessageService):
 
     elif event.type == EventType.PRINT_FAILED:
         err_code = event.data.get('error_code')
-        await message_service.log_message(
-            f'Printer {i + 1} failed! (code: {err_code})',
-            printer.camera_client.last_frame
-        )
+        await message_service.send_print_failed(i, err_code, printer.camera_client.last_frame)
 
     elif event.type == EventType.PRINT_PAUSED:
         err_code = event.data.get('error_code')
