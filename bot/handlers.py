@@ -115,7 +115,7 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
                 await update.message.reply_text(f"You only have access to Printer(s) {claimed_list}.")
                 return
 
-        frame = printer_manager.get_camera_frame(printer_index)
+        frame = await printer_manager.get_camera_frame(printer_index)
         if not frame:
             await update.message.reply_text(f"Printer {printer_index + 1} is not connected or has no camera frame.")
             return

@@ -31,7 +31,7 @@ async def monitor_loop(printer_manager: PrinterManager, message_service: Message
         # Process printer events
         for event in printer_manager.check_states():
             try:
-                await handle_event(event, message_service)
+                await handle_event(event, printer_manager, message_service)
             except Exception as e:
                 print(f'Error handling event {event.type}: {e}')
 
@@ -43,7 +43,7 @@ async def check_stale_cameras(printer_manager: PrinterManager, message_service: 
             continue
 
         gcode_state = printer.get_state()
-        has_frame = printer.camera_client.last_frame is not None
+        has_frame = printer_manager.has_camera_frame(i)
 
         # If printer is IDLE and has no camera frame, it might need a restart
         if gcode_state == GcodeState.IDLE and not has_frame:
@@ -62,7 +62,7 @@ async def check_stale_cameras(printer_manager: PrinterManager, message_service: 
             _stale_camera_reported.discard(i)
 
 
-async def handle_event(event, message_service: MessageService):
+async def handle_event(event, printer_manager: PrinterManager, message_service: MessageService):
     printer = event.printer
     i = event.printer_index
 
@@ -87,33 +87,28 @@ async def handle_event(event, message_service: MessageService):
         await message_service.send_print_started(i, print_time, total_layers)
 
     elif event.type == EventType.PRINT_FINISHED:
-        printer.turn_light_on()
-        printer.camera_client.last_frame = None
-
-        # Wait for a fresh frame
-        for _ in range(10):
-            await asyncio.sleep(1)
-            if printer.camera_client.last_frame:
-                break
-
-        await message_service.send_print_finished(i, printer.camera_client.last_frame)
-        printer.turn_light_off()
+        frame = await printer_manager.get_camera_frame(i)
+        await message_service.send_print_finished(i, frame)
 
     elif event.type == EventType.PRINT_FAILED:
         err_code = event.data.get('error_code')
-        await message_service.send_print_failed(i, err_code, printer.camera_client.last_frame)
+        frame = await printer_manager.get_camera_frame(i)
+        await message_service.send_print_failed(i, err_code, frame)
 
     elif event.type == EventType.PRINT_PAUSED:
         err_code = event.data.get('error_code')
+        frame = await printer_manager.get_camera_frame(i)
         await message_service.log_message(
             f'Printer {i + 1} has paused printing. (code: {err_code})',
-            printer.camera_client.last_frame
+            frame
         )
 
     elif event.type == EventType.LAYER_CHANGED:
         layer = event.data['layer']
         if layer == 2:
-            await message_service.send_layer2_notification(i, printer.camera_client.last_frame)
+            frame = await printer_manager.get_camera_frame(i)
+            await message_service.send_layer2_notification(i, frame)
 
         # Check for custom layer notification (handles both layer and percent notifications)
-        await message_service.send_custom_layer_notification(i, layer, printer.camera_client.last_frame)
+        frame = await printer_manager.get_camera_frame(i)
+        await message_service.send_custom_layer_notification(i, layer, frame)

@@ -1,3 +1,4 @@
+import asyncio
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -168,7 +169,7 @@ class PrinterManager:
             print_state = printer.get_current_state()
 
             # Check for stale camera
-            has_frame = printer.camera_client.last_frame is not None
+            has_frame = self.has_camera_frame(i)
             camera_indicator = '' if has_frame else ' [NO CAM]'
 
             if not has_frame:
@@ -201,11 +202,29 @@ class PrinterManager:
             return self.printers[index]
         return None
 
-    def get_camera_frame(self, index: int) -> bytes | None:
+    def has_camera_frame(self, index: int) -> bool:
+        printer = self.get_printer(index)
+        if not printer or not printer.mqtt_client_ready():
+            return False
+        return printer.camera_client.last_frame is not None
+
+    async def get_camera_frame(self, index: int) -> bytes | None:
+        """Turn on the light, capture a fresh frame, then turn off the light."""
         printer = self.get_printer(index)
         if not printer or not printer.mqtt_client_ready():
             return None
+
+        printer.turn_light_on()
+        printer.camera_client.last_frame = None
+
+        for _ in range(10):
+            await asyncio.sleep(2)
+            if printer.camera_client.last_frame:
+                break
+
         frame = printer.camera_client.last_frame
+        printer.turn_light_off()
+
         if isinstance(frame, bytearray):
             return bytes(frame)
         return frame
