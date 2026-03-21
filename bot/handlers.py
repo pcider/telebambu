@@ -361,6 +361,7 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
             return
 
         try:
+            printer.reboot()
             printer.disconnect()
             printer.connect()
             await update.message.reply_text(f"Printer {printer_num} reconnection initiated.")
@@ -704,6 +705,7 @@ async def handle_restart_printer(query, user, printer_manager):
         return
 
     try:
+        printer.reboot()
         printer.disconnect()
         printer.connect()
         await query.edit_message_text(f"Printer {printer_index + 1} reconnection initiated.")
