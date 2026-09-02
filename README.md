@@ -142,6 +142,9 @@ sudo systemctl start telebambu
 ### Telegram Commands
 
 - `/camera <number>` - Get a live camera snapshot from a printer (owner can access all printers, users can access their claimed printer)
+- `/notify [printer] <layer>` or `/notify [printer] <percent>%` - Send a one-time notification with a camera snapshot at a milestone
+- `/notify_every [printer] layers|time|percent <number>` - Send recurring camera snapshots during a print
+- `/notify_every [printer] off` - Disable recurring camera snapshots
 
 ### Interactive Buttons
 

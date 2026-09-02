@@ -214,6 +214,75 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
 
     app.add_handler(CommandHandler("notify", handle_notify))
 
+    # /notify_every command - send recurring camera snapshots during a print
+    async def handle_notify_every(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        claimed = _get_claimed_printers(storage, user_id)
+
+        if not claimed:
+            await update.message.reply_text("You don't have an active print claimed.")
+            return
+        if not context.args:
+            await update.message.reply_text(
+                "Usage: /notify_every [printer] layers <number>, time <minutes>, "
+                "percent <number>, or off\nExamples: /notify_every layers 5, /notify_every time 30"
+            )
+            return
+
+        args = list(context.args)
+        printer_index = None
+        if len(args) >= 2:
+            try:
+                maybe_printer = int(args[0])
+                if 1 <= maybe_printer <= len(cfg.PRINTERS) and maybe_printer - 1 in claimed:
+                    printer_index = maybe_printer - 1
+                    args = args[1:]
+            except ValueError:
+                pass
+
+        if printer_index is None:
+            if len(claimed) == 1:
+                printer_index = claimed[0]
+            else:
+                printer_list = ", ".join(str(idx + 1) for idx in claimed)
+                await update.message.reply_text(f"You have multiple prints claimed ({printer_list}). Usage: /notify_every <printer> <layers|time|percent> <number>")
+                return
+
+        if args[0].lower() == "off":
+            storage.clear_notify_every(printer_index)
+            await update.message.reply_text(f"Recurring camera notifications disabled for Printer {printer_index + 1}.")
+            return
+
+        if len(args) != 2 or args[0].lower() not in ("layers", "time", "percent"):
+            await update.message.reply_text("Usage: /notify_every [printer] layers <number>, time <minutes>, percent <number>, or off")
+            return
+        try:
+            value = int(args[1])
+            if value < 1:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("The interval must be a positive whole number.")
+            return
+
+        notify_type = args[0].lower()
+        if notify_type == "percent" and value > 100:
+            await update.message.reply_text("Percentage interval must be between 1 and 100.")
+            return
+
+        initial_value = 0
+        printer = printer_manager.get_printer(printer_index) if printer_manager else None
+        if printer and printer.mqtt_client_ready():
+            if notify_type == "layers":
+                initial_value = printer.current_layer_num() // value
+            elif notify_type == "percent":
+                initial_value = printer.get_percentage() // value
+
+        storage.set_notify_every(printer_index, notify_type, value, initial_value)
+        unit = {"layers": "layers", "time": "minutes", "percent": "%"}[notify_type]
+        await update.message.reply_text(f"Recurring camera notifications set every {value} {unit} on Printer {printer_index + 1}.")
+
+    app.add_handler(CommandHandler("notify_every", handle_notify_every))
+
     # /info command - show info about user's current print
     async def handle_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -315,8 +384,10 @@ def setup_handlers(app: Application, storage: Storage, message_service, printer_
             "Available commands:\n"
             "/help - Show this help message\n"
             "/info [printer] - Show info about your print\n"
-            "/notify [printer] <layer> - Get notified at a specific layer\n"
-            "/notify [printer] <percent>% - Get notified at a percentage\n"
+            "/notify [printer] <layer> - Send a one-time notification at a layer\n"
+            "/notify [printer] <percent>% - Send a one-time notification at a percentage\n"
+            "/notify_every [printer] layers|time|percent <number> - Send recurring camera snapshots\n"
+            "/notify_every [printer] off - Disable recurring camera snapshots\n"
             "/camera [printer] - View camera image from your printer\n"
             "/unclaim [printer] - Unclaim your print\n\n"
             "Note: [printer] is required when you have multiple prints claimed."
@@ -677,8 +748,10 @@ async def handle_help_callback(query):
         "Available commands:\n"
         "/help - Show this help message\n"
         "/info [printer] - Show info about your print\n"
-        "/notify [printer] <layer> - Get notified at a specific layer\n"
-        "/notify [printer] <percent>% - Get notified at a percentage\n"
+        "/notify [printer] <layer> - Send a one-time notification at a layer\n"
+        "/notify [printer] <percent>% - Send a one-time notification at a percentage\n"
+        "/notify_every [printer] layers|time|percent <number> - Send recurring camera snapshots\n"
+        "/notify_every [printer] off - Disable recurring camera snapshots\n"
         "/camera [printer] - View camera image from your printer\n"
         "/unclaim [printer] - Unclaim your print\n\n"
         "Note: [printer] is required when you have multiple prints claimed."
