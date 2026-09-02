@@ -49,7 +49,7 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    ```python
    # Telegram Chat IDs
    # Format: 'chat_id' or 'chat_id/thread_id' if using forum threads
-   LOG_CHAT_ID = '1234567890'        # Chat for logging (set to None to disable)
+   LOG_CHAT_ID = '1234567890'        # Chat/topic for logging (set to None to disable)
    CHAT_ID = '1234567890/1234'       # Main chat for print updates
    STATUS_CHAT_ID = '1234567890/1234' # Chat for status messages
 

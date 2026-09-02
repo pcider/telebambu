@@ -315,12 +315,14 @@ class MessageService:
             await self.bot.send_photo(
                 chat_id=self.ctx.log_chat_id,
                 photo=InputFile(image),
-                caption=self._message_buffer
+                caption=self._message_buffer,
+                message_thread_id=self.ctx.log_thread_id
             )
         else:
             await self.bot.send_message(
                 chat_id=self.ctx.log_chat_id,
-                text=self._message_buffer
+                text=self._message_buffer,
+                message_thread_id=self.ctx.log_thread_id
             )
 
         self._message_buffer = ''
@@ -356,4 +358,3 @@ class MessageService:
                 #     parse_mode=ParseMode.MARKDOWN_V2
                 # )
                 # self.storage.set_status_message_id(msg.message_id)
-
