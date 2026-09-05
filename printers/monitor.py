@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from bambulabs_api import GcodeState
@@ -27,6 +28,9 @@ async def monitor_loop(printer_manager: PrinterManager, message_service: Message
 
         # Check for stale cameras on idle printers
         await check_stale_cameras(printer_manager, message_service)
+
+        # Send recurring camera notifications when their configured trigger is due.
+        await check_periodic_camera_notifications(printer_manager, message_service)
 
         # Process printer events
         for event in printer_manager.check_states():
@@ -60,6 +64,38 @@ async def check_stale_cameras(printer_manager: PrinterManager, message_service: 
         elif has_frame and i in _stale_camera_reported:
             # Camera recovered, clear the flag
             _stale_camera_reported.discard(i)
+
+
+async def check_periodic_camera_notifications(printer_manager: PrinterManager, message_service: MessageService):
+    for i, printer in enumerate(printer_manager.printers):
+        if not printer or not printer.mqtt_client_ready():
+            continue
+
+        session = message_service.storage.get_print(i)
+        if not session or not session.claimed_by or not session.notify_every_type:
+            continue
+        if printer.get_state() != GcodeState.RUNNING:
+            continue
+
+        trigger_value = None
+        due = False
+        if session.notify_every_type == "layers":
+            interval = session.notify_every_value
+            current_layer = printer.current_layer_num()
+            trigger_value = current_layer // interval if interval else 0
+            due = trigger_value > 0 and trigger_value > (session.notify_every_last_value or 0)
+        elif session.notify_every_type == "percent":
+            interval = session.notify_every_value
+            progress = printer.get_percentage()
+            trigger_value = progress // interval if interval else 0
+            due = trigger_value > 0 and trigger_value > (session.notify_every_last_value or 0)
+        elif session.notify_every_type == "time":
+            interval_seconds = session.notify_every_value * 60
+            due = time.time() - (session.notify_every_last_sent_at or 0) >= interval_seconds
+
+        if due:
+            frame = await printer_manager.get_camera_frame(i)
+            await message_service.send_periodic_camera_notification(i, printer, trigger_value, frame)
 
 
 async def handle_event(event, printer_manager: PrinterManager, message_service: MessageService):

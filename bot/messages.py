@@ -192,6 +192,49 @@ class MessageService:
 
         self.storage.mark_notify_layer_notified(printer_index)
 
+    async def send_periodic_camera_notification(self, printer_index: int, printer,
+                                                 trigger_value: int | None = None,
+                                                 image: bytes | bytearray | None = None):
+        session = self.storage.get_print(printer_index)
+        if not session or not session.claimed_by or not session.notify_every_type:
+            return
+
+        if isinstance(image, bytearray):
+            image = bytes(image)
+        if not image:
+            return
+
+        progress = printer.get_percentage()
+        current_layer = printer.current_layer_num()
+        total_layers = printer.total_layer_num()
+        if session.notify_every_type == "layers":
+            detail = f"layer {current_layer}/{total_layers}"
+        elif session.notify_every_type == "percent":
+            detail = f"{progress}% complete"
+        else:
+            detail = f"layer {current_layer}/{total_layers}, {progress}% complete"
+
+        message = f"Printer {printer_index + 1}: Camera update ({detail})."
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Unclaim Print", callback_data=f"unclaim_{printer_index}")]
+        ])
+
+        if image:
+            await self.bot.send_photo(
+                chat_id=session.claimed_by,
+                photo=InputFile(image),
+                caption=message,
+                reply_markup=keyboard
+            )
+        else:
+            await self.bot.send_message(
+                chat_id=session.claimed_by,
+                text=message,
+                reply_markup=keyboard
+            )
+
+        self.storage.mark_notify_every_sent(printer_index, trigger_value)
+
     async def send_print_failed(self, printer_index: int, error_code, image: bytes | bytearray | None = None):
         """Send print failure notification to the print owner (if claimed) and bot owner.
         Deletes the 'started printing' message and cleans up the session."""
@@ -315,12 +358,14 @@ class MessageService:
             await self.bot.send_photo(
                 chat_id=self.ctx.log_chat_id,
                 photo=InputFile(image),
-                caption=self._message_buffer
+                caption=self._message_buffer,
+                message_thread_id=self.ctx.log_thread_id
             )
         else:
             await self.bot.send_message(
                 chat_id=self.ctx.log_chat_id,
-                text=self._message_buffer
+                text=self._message_buffer,
+                message_thread_id=self.ctx.log_thread_id
             )
 
         self._message_buffer = ''
@@ -356,4 +401,3 @@ class MessageService:
                 #     parse_mode=ParseMode.MARKDOWN_V2
                 # )
                 # self.storage.set_status_message_id(msg.message_id)
-

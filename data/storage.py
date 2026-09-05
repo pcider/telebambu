@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from dataclasses import dataclass, asdict
 from typing import Optional
 
@@ -21,6 +22,10 @@ class PrintSession:
     notify_layer_notified: bool = False
     notify_type: Optional[str] = None  # "layer" or "percent"
     notify_original_value: Optional[int] = None  # original value for display
+    notify_every_type: Optional[str] = None  # "layers", "percent", or "time"
+    notify_every_value: Optional[int] = None
+    notify_every_last_value: Optional[int] = None
+    notify_every_last_sent_at: Optional[float] = None
 
 
 @dataclass
@@ -139,6 +144,32 @@ class Storage:
             session.notify_layer_notified = True
             self._save()
 
+    def set_notify_every(self, printer_index: int, notify_type: str, value: int, initial_value: int = 0):
+        session = self.active_prints.get(printer_index)
+        if session:
+            session.notify_every_type = notify_type
+            session.notify_every_value = value
+            session.notify_every_last_value = initial_value
+            session.notify_every_last_sent_at = time.time() if notify_type == "time" else None
+            self._save()
+
+    def clear_notify_every(self, printer_index: int):
+        session = self.active_prints.get(printer_index)
+        if session:
+            session.notify_every_type = None
+            session.notify_every_value = None
+            session.notify_every_last_value = None
+            session.notify_every_last_sent_at = None
+            self._save()
+
+    def mark_notify_every_sent(self, printer_index: int, value: int = None):
+        session = self.active_prints.get(printer_index)
+        if session:
+            if value is not None:
+                session.notify_every_last_value = value
+            session.notify_every_last_sent_at = time.time()
+            self._save()
+
     def end_print(self, printer_index: int) -> Optional[PrintSession]:
         session = self.active_prints.pop(printer_index, None)
         self._save()
@@ -161,6 +192,10 @@ class Storage:
         session.notify_layer_notified = False
         session.notify_type = None
         session.notify_original_value = None
+        session.notify_every_type = None
+        session.notify_every_value = None
+        session.notify_every_last_value = None
+        session.notify_every_last_sent_at = None
         self._save()
         return session
 
