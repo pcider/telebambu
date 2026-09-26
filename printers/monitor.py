@@ -1,150 +1,145 @@
+from __future__ import annotations
+
 import asyncio
 import time
+from typing import TYPE_CHECKING
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from bambulabs_api import GcodeState
 
-from .manager import PrinterManager, EventType
-from bot.messages import MessageService
-import config as cfg
+from .manager import PrinterManager, PrinterEvent, EventType, format_duration, to_int
 
-# Track which printers have been reported as stale to avoid spam
-_stale_camera_reported: set[int] = set()
+if TYPE_CHECKING:
+    from bot.messages import MessageService
+
+DEFAULT_UPDATE_INTERVAL = 5  # seconds
+PRINT_STARTED_DELAY = 2  # seconds to let the printer update its time estimate
 
 
-async def monitor_loop(printer_manager: PrinterManager, message_service: MessageService):
-    while True:
-        await asyncio.sleep(5)
+class PrinterMonitor:
+    def __init__(self, printer_manager: PrinterManager, message_service: MessageService, interval: float = DEFAULT_UPDATE_INTERVAL):
+        self.pm = printer_manager
+        self.ms = message_service
+        self.storage = message_service.storage
+        self.interval = interval
+        # Printers already reported as having a stale camera, to avoid spam
+        self._stale_camera_reported: set[int] = set()
 
-        # Reconnect printers if needed
-        await printer_manager.reconnect_if_needed(message_service.log_message)
+    async def run(self):
+        while True:
+            await asyncio.sleep(self.interval)
+            try:
+                await self.tick()
+            except Exception as e:
+                print(f'Monitor tick failed: {e}')
 
-        # Update status message
+    async def tick(self):
+        await self.pm.reconnect_if_needed(self.ms.log_message)
+
         try:
-            status_text = printer_manager.get_status_text()
-            await message_service.update_status_message(status_text)
+            await self.ms.update_status_message(self.pm.get_status_text())
         except Exception as e:
             print(f'Failed to update status message: {e}')
 
-        # Check for stale cameras on idle printers
-        await check_stale_cameras(printer_manager, message_service)
+        # Printers are independent, so a slow camera capture on one doesn't hold up the rest
+        await asyncio.gather(*(self._process_printer(i) for i in range(len(self.pm))))
 
-        # Send recurring camera notifications when their configured trigger is due.
-        await check_periodic_camera_notifications(printer_manager, message_service)
+        await self.ms.flush_logs()
 
-        # Process printer events
-        for event in printer_manager.check_states():
+    async def _process_printer(self, i: int):
+        try:
+            await self._check_stale_camera(i)
+            await self._check_periodic_camera(i)
+        except Exception as e:
+            print(f'Error running checks for printer {i + 1}: {e}')
+
+        for event in self.pm.poll(i):
             try:
-                await handle_event(event, printer_manager, message_service)
+                await self._handle_event(event)
             except Exception as e:
-                print(f'Error handling event {event.type}: {e}')
+                print(f'Error handling event {event.type} for printer {i + 1}: {e}')
 
+    async def _check_stale_camera(self, i: int):
+        """If an idle printer has no camera frame it might need a restart; tell the owner once."""
+        printer = self.pm.get_online_printer(i)
+        if not printer:
+            return
 
-async def check_stale_cameras(printer_manager: PrinterManager, message_service: MessageService):
-    """Check if any idle printers have stale cameras and notify owner."""
-    for i, printer in enumerate(printer_manager.printers):
-        if not printer or not printer.mqtt_client_ready():
-            continue
-
-        gcode_state = printer.get_state()
-        has_frame = printer_manager.has_camera_frame(i)
-
-        # If printer is IDLE and has no camera frame, it might need a restart
-        if gcode_state == GcodeState.IDLE and not has_frame:
-            if i not in _stale_camera_reported:
-                _stale_camera_reported.add(i)
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Restart Printer", callback_data=f"restart_printer_{i}")]
-                ])
-                await message_service.bot.send_message(
-                    chat_id=cfg.OWNER_ID,
-                    text=f"Printer {i + 1} is IDLE but camera is not updating. Consider restarting.",
-                    reply_markup=keyboard
-                )
-        elif has_frame and i in _stale_camera_reported:
+        has_frame = self.pm.has_camera_frame(i)
+        if printer.get_state() == GcodeState.IDLE and not has_frame:
+            if i not in self._stale_camera_reported:
+                self._stale_camera_reported.add(i)
+                await self.ms.send_stale_camera_alert(i)
+        elif has_frame:
             # Camera recovered, clear the flag
-            _stale_camera_reported.discard(i)
+            self._stale_camera_reported.discard(i)
 
-
-async def check_periodic_camera_notifications(printer_manager: PrinterManager, message_service: MessageService):
-    for i, printer in enumerate(printer_manager.printers):
-        if not printer or not printer.mqtt_client_ready():
-            continue
-
-        session = message_service.storage.get_print(i)
+    async def _check_periodic_camera(self, i: int):
+        """Send a recurring camera snapshot when the claimer's configured trigger is due."""
+        session = self.storage.get_print(i)
         if not session or not session.claimed_by or not session.notify_every_type:
-            continue
-        if printer.get_state() != GcodeState.RUNNING:
-            continue
+            return
+        snap = self.pm.snapshot(i)
+        if not snap or snap.state != GcodeState.RUNNING:
+            return
 
+        interval = session.notify_every_value or 0
         trigger_value = None
-        due = False
-        if session.notify_every_type == "layers":
-            interval = session.notify_every_value
-            current_layer = printer.current_layer_num()
-            trigger_value = current_layer // interval if interval else 0
-            due = trigger_value > 0 and trigger_value > (session.notify_every_last_value or 0)
-        elif session.notify_every_type == "percent":
-            interval = session.notify_every_value
-            progress = printer.get_percentage()
-            trigger_value = progress // interval if interval else 0
-            due = trigger_value > 0 and trigger_value > (session.notify_every_last_value or 0)
-        elif session.notify_every_type == "time":
-            interval_seconds = session.notify_every_value * 60
-            due = time.time() - (session.notify_every_last_sent_at or 0) >= interval_seconds
+        if session.notify_every_type in ("layers", "percent"):
+            current = snap.layer if session.notify_every_type == "layers" else snap.progress
+            trigger_value = current // interval if interval else 0
+            due = trigger_value > (session.notify_every_last_value or 0)
+        else:  # "time"
+            due = time.time() - (session.notify_every_last_sent_at or 0) >= interval * 60
 
         if due:
-            frame = await printer_manager.get_camera_frame(i)
-            await message_service.send_periodic_camera_notification(i, printer, trigger_value, frame)
+            frame = await self.pm.get_camera_frame(i)
+            await self.ms.send_periodic_camera_notification(i, snap, trigger_value, frame)
 
+    async def _handle_event(self, event: PrinterEvent):
+        printer = event.printer
+        i = event.printer_index
 
-async def handle_event(event, printer_manager: PrinterManager, message_service: MessageService):
-    printer = event.printer
-    i = event.printer_index
+        if event.type == EventType.STATE_CHANGED:
+            # Log state changes to stdout only (not to Telegram)
+            if 'new' in event.data:
+                await self.ms.log_message(
+                    f'Printer {i + 1} GCODE state: {event.data["prev"]} -> {event.data["new"]}', stdout_only=True)
+            else:
+                await self.ms.log_message(
+                    f'Printer {i + 1} PRINT state: {event.data["prev_print"]} -> {event.data["new_print"]}', stdout_only=True)
 
-    if event.type == EventType.STATE_CHANGED:
-        # Log state changes to stdout only (not to Telegram)
-        if 'prev' in event.data and 'new' in event.data:
-            await message_service.log_message(
-                f'Printer {i + 1} GCODE state: {event.data["prev"]} -> {event.data["new"]}',
-                stdout_only=True
-            )
-        elif 'prev_print' in event.data:
-            await message_service.log_message(
-                f'Printer {i + 1} PRINT state: {event.data["prev_print"]} -> {event.data["new_print"]}',
-                stdout_only=True
-            )
+        elif event.type == EventType.PRINT_STARTED:
+            await asyncio.sleep(PRINT_STARTED_DELAY)
+            await self.ms.send_print_started(i, format_duration(printer.get_time()), to_int(printer.total_layer_num()))
 
-    elif event.type == EventType.PRINT_STARTED:
-        # Delay to allow printer to update print time estimate
-        await asyncio.sleep(2)
-        print_time = message_service.format_print_time(printer.get_time())
-        total_layers = printer.total_layer_num()
-        await message_service.send_print_started(i, print_time, total_layers)
+        elif event.type == EventType.PRINT_FINISHED:
+            await self.ms.send_print_finished(i, await self.pm.get_camera_frame(i))
 
-    elif event.type == EventType.PRINT_FINISHED:
-        frame = await printer_manager.get_camera_frame(i)
-        await message_service.send_print_finished(i, frame)
+        elif event.type == EventType.PRINT_FAILED:
+            frame = await self.pm.get_camera_frame(i)
+            await self.ms.send_print_failed(i, event.data.get('error_code'), frame)
 
-    elif event.type == EventType.PRINT_FAILED:
-        err_code = event.data.get('error_code')
-        frame = await printer_manager.get_camera_frame(i)
-        await message_service.send_print_failed(i, err_code, frame)
+        elif event.type == EventType.PRINT_PAUSED:
+            frame = await self.pm.get_camera_frame(i)
+            await self.ms.log_message(f'Printer {i + 1} has paused printing. (code: {event.data.get("error_code")})', frame)
 
-    elif event.type == EventType.PRINT_PAUSED:
-        err_code = event.data.get('error_code')
-        frame = await printer_manager.get_camera_frame(i)
-        await message_service.log_message(
-            f'Printer {i + 1} has paused printing. (code: {err_code})',
-            frame
-        )
+        elif event.type == EventType.LAYER_CHANGED:
+            await self._handle_layer_change(i, event.data['prev_layer'], event.data['layer'])
 
-    elif event.type == EventType.LAYER_CHANGED:
-        layer = event.data['layer']
-        if layer == 2:
-            frame = await printer_manager.get_camera_frame(i)
-            await message_service.send_layer2_notification(i, frame)
+    async def _handle_layer_change(self, i: int, prev_layer: int, layer: int):
+        session = self.storage.get_print(i)
+        if not session or not session.claimed_by:
+            return
 
-        # Check for custom layer notification (handles both layer and percent notifications)
-        frame = await printer_manager.get_camera_frame(i)
-        await message_service.send_custom_layer_notification(i, layer, frame)
+        # Use crossings rather than exact matches so a missed poll doesn't skip a notification
+        layer2_due = session.layer2_notify and not session.layer2_notified and prev_layer < 2 <= layer
+        custom_due = bool(session.notify_layer) and not session.notify_layer_notified and layer >= session.notify_layer
+        if not (layer2_due or custom_due):
+            return
+
+        # One capture serves both notifications
+        frame = await self.pm.get_camera_frame(i)
+        if layer2_due:
+            await self.ms.send_layer2_notification(i, frame)
+        if custom_due:
+            await self.ms.send_custom_layer_notification(i, frame)

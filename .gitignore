@@ -4,3 +4,5 @@ venv/
 cur_status_id.txt
 *.log
 data.json
+telebambu.pid
+data.json.tmp

@@ -1,4 +1,4 @@
-from telegram.ext import Application, ContextTypes
+from telegram.ext import Application
 from dataclasses import dataclass
 
 import config as cfg
@@ -42,7 +42,8 @@ def parse_chat_id(chat_id_str: str | None) -> tuple[str | None, int | None]:
 
 
 def create_application() -> Application:
-    return Application.builder().token(cfg.TELEGRAM_BOT_TOKEN).build()
+    # Concurrent updates so a slow command (e.g. /camera waiting for a frame) doesn't block others
+    return Application.builder().token(cfg.TELEGRAM_BOT_TOKEN).concurrent_updates(True).build()
 
 
 def get_bot_context() -> BotContext:

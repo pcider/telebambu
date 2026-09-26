@@ -100,6 +100,7 @@ This will:
 - Change to the script's directory
 - Log a restart timestamp to `telebambu.log`
 - Run the bot with output redirected to `telebambu.log`
+- Write the bot's PID to `telebambu.pid` so `./stop.sh` can shut it down cleanly
 
 To view logs in real-time:
 ```bash
@@ -141,10 +142,17 @@ sudo systemctl start telebambu
 
 ### Telegram Commands
 
-- `/camera <number>` - Get a live camera snapshot from a printer (owner can access all printers, users can access their claimed printer)
+`[printer]` is optional when you have exactly one print claimed.
+
+- `/help` - List available commands
+- `/info [printer]` - Show progress, time remaining, layer and pending notifications for your print
+- `/camera [printer]` - Get a fresh camera snapshot (owner can access all printers, users can access their claimed printers)
+- `/light [printer]` - Toggle the printer light (owner or claimer)
 - `/notify [printer] <layer>` or `/notify [printer] <percent>%` - Send a one-time notification with a camera snapshot at a milestone
 - `/notify_every [printer] layers|time|percent <number>` - Send recurring camera snapshots during a print
 - `/notify_every [printer] off` - Disable recurring camera snapshots
+- `/unclaim [printer]` - Release your claim on a print
+- `/restart <printer>` - Reboot and reconnect a printer (owner only)
 
 ### Interactive Buttons
 
@@ -166,7 +174,8 @@ telebambu/
 ├── bot/                 # Telegram bot module
 │   ├── telegram_bot.py  # Bot initialization
 │   ├── handlers.py      # Command and callback handlers
-│   └── messages.py      # Message sending service
+│   ├── messages.py      # Message sending service
+│   └── ui.py            # Shared message texts and inline keyboards
 ├── printers/            # Printer management module
 │   ├── manager.py       # Printer connection manager
 │   └── monitor.py       # State monitoring loop

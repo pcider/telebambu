@@ -1,786 +1,464 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, filters
+from telegram import Update, CallbackQuery, InputFile
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from data import Storage
+from printers import PrinterManager
+from . import ui
+from .messages import MessageService
 import config as cfg
 
-
-def _get_claimed_printers(storage: Storage, user_id: int) -> list[int]:
-    """Get list of printer indices claimed by a user."""
-    return [idx for idx, session in storage.active_prints.items() if session.claimed_by == user_id]
-
-
-def _resolve_printer(storage: Storage, user_id: int, args: list, require_claim: bool = True) -> tuple[int | None, str | None]:
-    """
-    Resolve which printer to use based on user's claimed printers and optional argument.
-    Returns (printer_index, error_message). If error_message is set, printer_index is None.
-    """
-    claimed = _get_claimed_printers(storage, user_id)
-
-    if require_claim and not claimed:
-        return None, "You don't have an active print claimed."
-
-    # If printer number provided as argument
-    if args:
-        try:
-            printer_num = int(args[0])
-            printer_index = printer_num - 1
-            if printer_index < 0 or printer_index >= len(cfg.PRINTERS):
-                return None, f"Invalid printer number. Use 1-{len(cfg.PRINTERS)}"
-            if require_claim and printer_index not in claimed:
-                return None, f"You haven't claimed Printer {printer_num}."
-            return printer_index, None
-        except ValueError:
-            return None, None  # Not a number, might be another argument
-
-    # No argument provided
-    if len(claimed) == 1:
-        return claimed[0], None
-    elif len(claimed) > 1:
-        printer_list = ", ".join(str(idx + 1) for idx in claimed)
-        return None, f"You have multiple prints claimed ({printer_list}). Please specify the printer number."
-
-    return None, "You don't have an active print claimed."
+NOTIFY_USAGE = "Usage: /notify [printer] <layer> or /notify [printer] <percent>%"
+NOTIFY_EVERY_USAGE = "Usage: /notify_every [printer] layers <number>, time <minutes>, percent <number>, or off"
+NOTIFY_EVERY_UNITS = {"layers": "layers", "time": "minutes", "percent": "%"}
 
 
-def setup_handlers(app: Application, storage: Storage, message_service, printer_manager=None):
-    async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        query = update.callback_query
-        await query.answer()
+def _callback_index(query: CallbackQuery, position: int = -1) -> int:
+    """Extract the printer index from callback data such as ``claim_0`` or ``dm_pref_0_chat``."""
+    return int(query.data.split("_")[position])
 
-        data = query.data
-        user = query.from_user
 
-        if data.startswith("claim_"):
-            await handle_claim(query, user, storage, message_service, context, printer_manager)
-        elif data.startswith("dm_pref_"):
-            await handle_dm_preference(query, user, storage, message_service)
-        elif data.startswith("layer2_toggle_"):
-            await handle_layer2_toggle(query, user, storage)
-        elif data.startswith("unclaim_"):
-            await handle_unclaim_callback(query, user, storage, context)
-        elif data.startswith("restart_printer_"):
-            await handle_restart_printer(query, user, printer_manager)
-        elif data == "help":
-            await handle_help_callback(query)
+class BotHandlers:
+    def __init__(self, storage: Storage, message_service: MessageService, printer_manager: PrinterManager):
+        self.storage = storage
+        self.ms = message_service
+        self.pm = printer_manager
 
-    app.add_handler(CallbackQueryHandler(handle_callback))
+    def register(self, app: Application):
+        commands = {
+            "start": self.cmd_start,
+            "help": self.cmd_help,
+            "info": self.cmd_info,
+            "notify": self.cmd_notify,
+            "notify_every": self.cmd_notify_every,
+            "camera": self.cmd_camera,
+            "light": self.cmd_light,
+            "unclaim": self.cmd_unclaim,
+            "restart": self.cmd_restart,
+        }
+        for name, callback in commands.items():
+            app.add_handler(CommandHandler(name, callback))
 
-    # /camera command - owner has full access, claimers can access their printers
-    async def handle_camera(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        callbacks = {
+            r"^claim_\d+$": self.cb_claim,
+            r"^dm_pref_\d+_(chat|dm)$": self.cb_dm_preference,
+            r"^layer2_toggle_\d+$": self.cb_layer2_toggle,
+            r"^unclaim_\d+$": self.cb_unclaim,
+            r"^restart_printer_\d+$": self.cb_restart_printer,
+            r"^help$": self.cb_help,
+        }
+        for pattern, callback in callbacks.items():
+            app.add_handler(CallbackQueryHandler(callback, pattern=pattern))
+
+    # --- Shared logic ---
+
+    async def _resolve_printer(self, update: Update, args: list[str], *, takes_value: bool = False,
+                               owner_any: bool = False, usage: str = "") -> tuple[int, list[str]] | None:
+        """Work out which printer a command targets, replying with an error if it can't.
+
+        A leading number is read as the printer when the command has no value
+        argument, or when a value follows it (``/notify 2 50`` vs ``/notify 50``).
+        Without one, the user's single claimed printer is used. With
+        ``owner_any``, the bot owner may target any printer.
+
+        Returns ``(printer_index, remaining_args)``, or None if a reply was sent.
+        """
+        reply = update.effective_message.reply_text
         user_id = update.effective_user.id
-        is_owner = user_id == cfg.OWNER_ID
+        is_owner = owner_any and user_id == cfg.OWNER_ID
+        claimed = self.storage.claimed_printers(user_id)
+        printer_count = len(self.pm)
 
-        if not printer_manager:
-            await update.message.reply_text("Printer manager not available.")
-            return
+        if not claimed and not is_owner:
+            await reply(ui.NO_CLAIM)
+            return None
 
-        claimed = _get_claimed_printers(storage, user_id)
-
-        if not is_owner and not claimed:
-            await update.message.reply_text("You don't have access to any printer camera.")
-            return
-
-        if not context.args:
-            if len(claimed) == 1:
-                printer_index = claimed[0]
-            elif len(claimed) > 1:
-                printer_list = ", ".join(str(idx + 1) for idx in claimed)
-                await update.message.reply_text(f"You have multiple prints claimed ({printer_list}). Usage: /camera <printer>")
-                return
-            elif is_owner:
-                await update.message.reply_text(
-                    f"Usage: /camera <printer>\n"
-                    f"Available printers: 1-{len(cfg.PRINTERS)}"
-                )
-                return
-            else:
-                await update.message.reply_text("You don't have an active print claimed.")
-                return
-        else:
-            try:
-                printer_num = int(context.args[0])
-                printer_index = printer_num - 1
-            except ValueError:
-                await update.message.reply_text("Please provide a valid printer number.")
-                return
-
-            if printer_index < 0 or printer_index >= len(cfg.PRINTERS):
-                await update.message.reply_text(f"Invalid printer number. Use 1-{len(cfg.PRINTERS)}")
-                return
-
-            # Check permission: owner can access all, claimers only their printers
+        if args and args[0].isdigit() and (not takes_value or len(args) >= 2):
+            printer_index = int(args[0]) - 1
+            if not 0 <= printer_index < printer_count:
+                await reply(f"Invalid printer number. Use 1-{printer_count}")
+                return None
             if not is_owner and printer_index not in claimed:
                 claimed_list = ", ".join(str(idx + 1) for idx in claimed)
-                await update.message.reply_text(f"You only have access to Printer(s) {claimed_list}.")
-                return
+                await reply(f"You haven't claimed Printer {printer_index + 1}. Your printer(s): {claimed_list}")
+                return None
+            return printer_index, args[1:]
 
-        frame = await printer_manager.get_camera_frame(printer_index)
-        if not frame:
-            await update.message.reply_text(f"Printer {printer_index + 1} is not connected or has no camera frame.")
-            return
+        if args and not takes_value:
+            await reply("Please provide a valid printer number.")
+            return None
 
-        await update.message.reply_photo(
-            photo=InputFile(frame, filename=f"printer_{printer_index + 1}.jpg"),
-            caption=f"Camera image from Printer {printer_index + 1}"
+        if len(claimed) == 1:
+            return claimed[0], args
+
+        if claimed:
+            printer_list = ", ".join(str(idx + 1) for idx in claimed)
+            await reply(f"You have multiple prints claimed ({printer_list}). {usage}".strip())
+        else:
+            await reply(f"{usage}\nAvailable printers: 1-{printer_count}".strip())
+        return None
+
+    def _print_status(self, printer_index: int) -> str:
+        snap = self.pm.snapshot(printer_index)
+        if not snap:
+            return ""
+        return (
+            f"\n\nCurrent status:\n- Progress: {snap.progress}%\n"
+            f"- Time remaining: {snap.time_left}\n- Layer: {snap.layer}/{snap.total_layers}"
         )
 
-    app.add_handler(CommandHandler("camera", handle_camera))
+    async def _send_claim_dm(self, context: ContextTypes.DEFAULT_TYPE, user_id: int, printer_index: int):
+        """DM the claimer asking where they want the finished print image. Raises if the DM fails."""
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"You claimed Printer {printer_index + 1}!{self._print_status(printer_index)}\n\n{ui.CLAIM_DM_PROMPT}",
+            reply_markup=ui.dm_preference_keyboard(printer_index),
+        )
 
-    # /notify command - set a layer or percentage to be notified at
-    async def handle_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        claimed = _get_claimed_printers(storage, user_id)
-
-        if not claimed:
-            await update.message.reply_text("You don't have an active print claimed.")
-            return
-
-        if not context.args:
-            await update.message.reply_text("Usage: /notify [printer] <layer> or /notify [printer] <percent>%\nExamples: /notify 50 or /notify 2 75%")
-            return
-
-        # Determine printer index and notification value
-        args = list(context.args)
-        printer_index = None
-
-        # Check if first arg is a printer number
-        if len(args) >= 2:
-            try:
-                maybe_printer = int(args[0])
-                if 1 <= maybe_printer <= len(cfg.PRINTERS) and (maybe_printer - 1) in claimed:
-                    printer_index = maybe_printer - 1
-                    args = args[1:]  # Remove printer arg
-            except ValueError:
-                pass
-
-        # If no printer specified, resolve from claimed
-        if printer_index is None:
-            if len(claimed) == 1:
-                printer_index = claimed[0]
-            else:
-                printer_list = ", ".join(str(idx + 1) for idx in claimed)
-                await update.message.reply_text(f"You have multiple prints claimed ({printer_list}). Usage: /notify <printer> <layer|percent%>")
-                return
-
-        if not args:
-            await update.message.reply_text("Usage: /notify [printer] <layer> or /notify [printer] <percent>%")
-            return
-
-        arg = args[0]
-
-        # Check if it's a percentage
-        if arg.endswith('%'):
-            try:
-                percent = int(arg[:-1])
-                if percent < 1 or percent > 100:
-                    await update.message.reply_text("Percentage must be between 1 and 100.")
-                    return
-
-                # Get total layers to convert percent to layer
-                if not printer_manager:
-                    await update.message.reply_text("Printer manager not available.")
-                    return
-
-                printer = printer_manager.get_printer(printer_index)
-                if not printer or not printer.mqtt_client_ready():
-                    await update.message.reply_text(f"Printer {printer_index + 1} is not connected.")
-                    return
-
-                total_layers = printer.total_layer_num()
-                if total_layers <= 0:
-                    await update.message.reply_text("Cannot determine total layers for this print.")
-                    return
-
-                # Convert percent to target layer
-                target_layer = max(1, (percent * total_layers) // 100)
-                storage.set_notify_layer(printer_index, target_layer, notify_type="percent", original_value=percent)
-                await update.message.reply_text(f"You will be notified when {percent}% is reached (layer {target_layer}/{total_layers}) on Printer {printer_index + 1}.")
-
-            except ValueError:
-                await update.message.reply_text("Please provide a valid percentage.")
-        else:
-            try:
-                layer = int(arg)
-                if layer < 1:
-                    await update.message.reply_text("Layer must be a positive number.")
-                    return
-
-                storage.set_notify_layer(printer_index, layer, notify_type="layer", original_value=layer)
-                await update.message.reply_text(f"You will be notified when layer {layer} is reached on Printer {printer_index + 1}.")
-
-            except ValueError:
-                await update.message.reply_text("Please provide a valid layer number or percentage.")
-
-    app.add_handler(CommandHandler("notify", handle_notify))
-
-    # /notify_every command - send recurring camera snapshots during a print
-    async def handle_notify_every(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        claimed = _get_claimed_printers(storage, user_id)
-
-        if not claimed:
-            await update.message.reply_text("You don't have an active print claimed.")
-            return
-        if not context.args:
-            await update.message.reply_text(
-                "Usage: /notify_every [printer] layers <number>, time <minutes>, "
-                "percent <number>, or off\nExamples: /notify_every layers 5, /notify_every time 30"
-            )
-            return
-
-        args = list(context.args)
-        printer_index = None
-        if len(args) >= 2:
-            try:
-                maybe_printer = int(args[0])
-                if 1 <= maybe_printer <= len(cfg.PRINTERS) and maybe_printer - 1 in claimed:
-                    printer_index = maybe_printer - 1
-                    args = args[1:]
-            except ValueError:
-                pass
-
-        if printer_index is None:
-            if len(claimed) == 1:
-                printer_index = claimed[0]
-            else:
-                printer_list = ", ".join(str(idx + 1) for idx in claimed)
-                await update.message.reply_text(f"You have multiple prints claimed ({printer_list}). Usage: /notify_every <printer> <layers|time|percent> <number>")
-                return
-
-        if args[0].lower() == "off":
-            storage.clear_notify_every(printer_index)
-            await update.message.reply_text(f"Recurring camera notifications disabled for Printer {printer_index + 1}.")
-            return
-
-        if len(args) != 2 or args[0].lower() not in ("layers", "time", "percent"):
-            await update.message.reply_text("Usage: /notify_every [printer] layers <number>, time <minutes>, percent <number>, or off")
-            return
+    async def _unclaim(self, context: ContextTypes.DEFAULT_TYPE, printer_index: int) -> str:
+        """Unclaim a print, restore the Claim button in the main chat and return a reply text."""
+        session = self.storage.unclaim_print(printer_index)
         try:
-            value = int(args[1])
-            if value < 1:
-                raise ValueError
-        except ValueError:
-            await update.message.reply_text("The interval must be a positive whole number.")
+            await context.bot.edit_message_text(
+                chat_id=session.chat_id,
+                message_id=session.message_id,
+                text=ui.started_text(printer_index, session),
+                reply_markup=ui.claim_keyboard(printer_index),
+            )
+            return f"You have unclaimed Printer {printer_index + 1}."
+        except Exception:
+            return f"Unclaimed Printer {printer_index + 1}, but could not update the main chat message."
+
+    async def _restart(self, printer_index: int) -> str:
+        try:
+            self.pm.restart(printer_index)
+            return f"Printer {printer_index + 1} reconnection initiated."
+        except Exception as e:
+            return f"Failed to restart Printer {printer_index + 1}: {e}"
+
+    # --- Commands ---
+
+    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handles deep links from the "Start DM with bot" button."""
+        user = update.effective_user
+        reply = update.effective_message.reply_text
+        arg = context.args[0] if context.args else ""
+
+        if not (arg.startswith("claim_") and arg[len("claim_"):].isdigit()):
+            await reply("Welcome! Use the buttons in the main chat to claim prints.")
             return
 
-        notify_type = args[0].lower()
-        if notify_type == "percent" and value > 100:
-            await update.message.reply_text("Percentage interval must be between 1 and 100.")
+        printer_index = int(arg[len("claim_"):])
+        session = self.storage.get_print(printer_index)
+        if not session:
+            await reply(ui.SESSION_ENDED)
+            return
+        if session.claimed_by != user.id:
+            await reply("You are not the claimer of this print.")
             return
 
-        initial_value = 0
-        printer = printer_manager.get_printer(printer_index) if printer_manager else None
-        if printer and printer.mqtt_client_ready():
-            if notify_type == "layers":
-                initial_value = printer.current_layer_num() // value
-            elif notify_type == "percent":
-                initial_value = printer.get_percentage() // value
+        await self._send_claim_dm(context, user.id, printer_index)
 
-        storage.set_notify_every(printer_index, notify_type, value, initial_value)
-        unit = {"layers": "layers", "time": "minutes", "percent": "%"}[notify_type]
-        await update.message.reply_text(f"Recurring camera notifications set every {value} {unit} on Printer {printer_index + 1}.")
+        # Update the main chat message to remove the "Start DM" button
+        try:
+            await context.bot.edit_message_text(
+                chat_id=session.chat_id,
+                message_id=session.message_id,
+                text=ui.claimed_text(printer_index, session),
+            )
+        except Exception as e:
+            print(f'Exception: could not edit main chat message {session.message_id} on /start deep link: {e}')
 
-    app.add_handler(CommandHandler("notify_every", handle_notify_every))
+    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.effective_message.reply_text(ui.HELP_TEXT)
 
-    # /info command - show info about user's current print
-    async def handle_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        claimed = _get_claimed_printers(storage, user_id)
-
-        if not claimed:
-            await update.message.reply_text("You don't have an active print claimed.")
+    async def cmd_info(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        resolved = await self._resolve_printer(update, context.args, usage="Usage: /info <printer>")
+        if not resolved:
             return
+        printer_index, _ = resolved
+        reply = update.effective_message.reply_text
 
-        # Resolve printer from args or single claim
-        printer_index, error = _resolve_printer(storage, user_id, context.args)
-        if error:
-            await update.message.reply_text(error)
+        snap = self.pm.snapshot(printer_index)
+        if not snap:
+            await reply(f"Printer {printer_index + 1} is not connected.")
             return
-
-        session = storage.get_print(printer_index)
-
-        if not printer_manager:
-            await update.message.reply_text("Printer manager not available.")
-            return
-
-        printer = printer_manager.get_printer(printer_index)
-        if not printer or not printer.mqtt_client_ready():
-            await update.message.reply_text(f"Printer {printer_index + 1} is not connected.")
-            return
-
-        # Gather print info
-        progress = printer.get_percentage()
-        time_left = printer_manager._format_print_time(printer.get_time())
-        current_layer = printer.current_layer_num()
-        total_layers = printer.total_layer_num()
-        gcode_state = printer.get_state()
 
         info_text = (
             f"Printer {printer_index + 1} Info:\n"
-            f"- Status: {gcode_state}\n"
-            f"- Progress: {progress}%\n"
-            f"- Time remaining: {time_left}\n"
-            f"- Layer: {current_layer}/{total_layers}\n"
+            f"- Status: {snap.state}\n"
+            f"- Progress: {snap.progress}%\n"
+            f"- Time remaining: {snap.time_left}\n"
+            f"- Layer: {snap.layer}/{snap.total_layers}\n"
         )
 
+        session = self.storage.get_print(printer_index)
         if session and session.notify_layer and not session.notify_layer_notified:
             if session.notify_type == "percent":
                 info_text += f"- Notification: {session.notify_original_value}% (layer {session.notify_layer})\n"
             else:
                 info_text += f"- Notification: layer {session.notify_layer}\n"
+        if session and session.notify_every_type:
+            info_text += f"- Recurring snapshots: every {session.notify_every_value} {NOTIFY_EVERY_UNITS[session.notify_every_type]}\n"
 
-        await update.message.reply_text(info_text)
+        await reply(info_text)
 
-    app.add_handler(CommandHandler("info", handle_info))
-
-    # /unclaim command - unclaim the print and revert main chat message
-    async def handle_unclaim(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-
-        # Resolve printer from args or single claim
-        printer_index, error = _resolve_printer(storage, user_id, context.args)
-        if error:
-            await update.message.reply_text(error)
+    async def cmd_notify(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Set a layer or percentage to be notified at."""
+        reply = update.effective_message.reply_text
+        if self.storage.claimed_printers(update.effective_user.id) and not context.args:
+            await reply(f"{NOTIFY_USAGE}\nExamples: /notify 50 or /notify 2 75%")
             return
 
-        session = storage.get_print(printer_index)
-        if not session:
-            await update.message.reply_text("This print session has ended.")
+        resolved = await self._resolve_printer(update, context.args, takes_value=True,
+                                               usage="Usage: /notify <printer> <layer|percent%>")
+        if not resolved:
+            return
+        printer_index, args = resolved
+        if not args:
+            await reply(NOTIFY_USAGE)
             return
 
-        # Store message info before unclaiming
-        message_id = session.message_id
-        chat_id = session.chat_id.split("/")[0] if "/" in session.chat_id else session.chat_id
-        print_time = session.print_time
-
-        # Unclaim the print
-        storage.unclaim_print(printer_index)
-
-        # Restore the main chat message with the Claim Print button
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Claim Print", callback_data=f"claim_{printer_index}")]
-        ])
-
-        print_time_str = f" (print time: {print_time})" if print_time else ""
-        message = f"Printer {printer_index + 1} has started printing.{print_time_str}"
-
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=message,
-                reply_markup=keyboard
-            )
-            await update.message.reply_text(f"You have unclaimed Printer {printer_index + 1}.")
-        except Exception:
-            await update.message.reply_text(f"Unclaimed Printer {printer_index + 1}, but could not update the main chat message.")
-
-    app.add_handler(CommandHandler("unclaim", handle_unclaim))
-
-    # /help command
-    async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        help_text = (
-            "Available commands:\n"
-            "/help - Show this help message\n"
-            "/info [printer] - Show info about your print\n"
-            "/notify [printer] <layer> - Send a one-time notification at a layer\n"
-            "/notify [printer] <percent>% - Send a one-time notification at a percentage\n"
-            "/notify_every [printer] layers|time|percent <number> - Send recurring camera snapshots\n"
-            "/notify_every [printer] off - Disable recurring camera snapshots\n"
-            "/camera [printer] - View camera image from your printer\n"
-            "/unclaim [printer] - Unclaim your print\n\n"
-            "Note: [printer] is required when you have multiple prints claimed."
-        )
-        await update.message.reply_text(help_text)
-
-    app.add_handler(CommandHandler("help", handle_help))
-
-    # /restart command - owner only, restart printer connection
-    async def handle_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-
-        if user_id != cfg.OWNER_ID:
-            await update.message.reply_text("Only the bot owner can use this command.")
-            return
-
-        if not printer_manager:
-            await update.message.reply_text("Printer manager not available.")
-            return
-
-        if not context.args:
-            await update.message.reply_text(
-                f"Usage: /restart <printer>\n"
-                f"Available printers: 1-{len(cfg.PRINTERS)}"
-            )
-            return
-
-        try:
-            printer_num = int(context.args[0])
-            printer_index = printer_num - 1
-        except ValueError:
-            await update.message.reply_text("Please provide a valid printer number.")
-            return
-
-        if printer_index < 0 or printer_index >= len(cfg.PRINTERS):
-            await update.message.reply_text(f"Invalid printer number. Use 1-{len(cfg.PRINTERS)}")
-            return
-
-        printer = printer_manager.get_printer(printer_index)
-        if not printer:
-            await update.message.reply_text(f"Printer {printer_num} not found.")
-            return
-
-        try:
-            printer.reboot()
-            printer.disconnect()
-            printer.connect()
-            await update.message.reply_text(f"Printer {printer_num} reconnection initiated.")
-        except Exception as e:
-            await update.message.reply_text(f"Failed to restart Printer {printer_num}: {e}")
-
-    app.add_handler(CommandHandler("restart", handle_restart))
-
-    # /light command - toggle printer light (owner or claimer)
-    async def handle_light(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        is_owner = user_id == cfg.OWNER_ID
-        claimed = _get_claimed_printers(storage, user_id)
-
-        if not is_owner and not claimed:
-            await update.message.reply_text("You don't have an active print claimed.")
-            return
-
-        if not printer_manager:
-            await update.message.reply_text("Printer manager not available.")
-            return
-
-        # Resolve printer - owner can access any, claimers only their own
-        if not context.args:
-            if len(claimed) == 1:
-                printer_index = claimed[0]
-            elif len(claimed) > 1:
-                printer_list = ", ".join(str(idx + 1) for idx in claimed)
-                await update.message.reply_text(f"You have multiple prints claimed ({printer_list}). Usage: /light <printer>")
-                return
-            elif is_owner:
-                await update.message.reply_text(
-                    f"Usage: /light <printer>\n"
-                    f"Available printers: 1-{len(cfg.PRINTERS)}"
-                )
-                return
-            else:
-                await update.message.reply_text("You don't have an active print claimed.")
-                return
-        else:
+        arg = args[0]
+        if arg.endswith('%'):
             try:
-                printer_num = int(context.args[0])
-                printer_index = printer_num - 1
+                percent = int(arg[:-1])
             except ValueError:
-                await update.message.reply_text("Please provide a valid printer number.")
+                await reply("Please provide a valid percentage.")
+                return
+            if not 1 <= percent <= 100:
+                await reply("Percentage must be between 1 and 100.")
                 return
 
-            if printer_index < 0 or printer_index >= len(cfg.PRINTERS):
-                await update.message.reply_text(f"Invalid printer number. Use 1-{len(cfg.PRINTERS)}")
+            # Convert percent to a target layer using the print's total layers
+            snap = self.pm.snapshot(printer_index)
+            if not snap:
+                await reply(f"Printer {printer_index + 1} is not connected.")
+                return
+            if snap.total_layers <= 0:
+                await reply("Cannot determine total layers for this print.")
                 return
 
-            # Check permission: owner can access all, claimers only their printers
-            if not is_owner and printer_index not in claimed:
-                claimed_list = ", ".join(str(idx + 1) for idx in claimed)
-                await update.message.reply_text(f"You only have access to Printer(s) {claimed_list}.")
-                return
-
-        printer = printer_manager.get_printer(printer_index)
-        if not printer or not printer.mqtt_client_ready():
-            await update.message.reply_text(f"Printer {printer_index + 1} is not connected.")
+            target_layer = max(1, (percent * snap.total_layers) // 100)
+            self.storage.set_notify_layer(printer_index, target_layer, notify_type="percent", original_value=percent)
+            await reply(f"You will be notified when {percent}% is reached "
+                        f"(layer {target_layer}/{snap.total_layers}) on Printer {printer_index + 1}.")
             return
 
         try:
-            # Toggle light - check current state and flip it
-            current_state = printer.get_light_state()
-            if current_state:
-                printer.turn_light_off()
-                await update.message.reply_text(f"Printer {printer_index + 1} light turned OFF.")
-            else:
-                printer.turn_light_on()
-                await update.message.reply_text(f"Printer {printer_index + 1} light turned ON.")
+            layer = int(arg)
+        except ValueError:
+            await reply("Please provide a valid layer number or percentage.")
+            return
+        if layer < 1:
+            await reply("Layer must be a positive number.")
+            return
+
+        self.storage.set_notify_layer(printer_index, layer, notify_type="layer", original_value=layer)
+        await reply(f"You will be notified when layer {layer} is reached on Printer {printer_index + 1}.")
+
+    async def cmd_notify_every(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Send recurring camera snapshots during a print."""
+        reply = update.effective_message.reply_text
+        if self.storage.claimed_printers(update.effective_user.id) and not context.args:
+            await reply(f"{NOTIFY_EVERY_USAGE}\nExamples: /notify_every layers 5, /notify_every time 30")
+            return
+
+        resolved = await self._resolve_printer(update, context.args, takes_value=True,
+                                               usage="Usage: /notify_every <printer> <layers|time|percent> <number>")
+        if not resolved:
+            return
+        printer_index, args = resolved
+
+        if args and args[0].lower() == "off":
+            self.storage.clear_notify_every(printer_index)
+            await reply(f"Recurring camera notifications disabled for Printer {printer_index + 1}.")
+            return
+
+        if len(args) != 2 or args[0].lower() not in NOTIFY_EVERY_UNITS:
+            await reply(NOTIFY_EVERY_USAGE)
+            return
+
+        notify_type = args[0].lower()
+        try:
+            value = int(args[1])
+        except ValueError:
+            value = 0
+        if value < 1:
+            await reply("The interval must be a positive whole number.")
+            return
+        if notify_type == "percent" and value > 100:
+            await reply("Percentage interval must be between 1 and 100.")
+            return
+
+        # Start counting from the current position so we don't immediately fire
+        initial_value = 0
+        snap = self.pm.snapshot(printer_index)
+        if snap and notify_type == "layers":
+            initial_value = snap.layer // value
+        elif snap and notify_type == "percent":
+            initial_value = snap.progress // value
+
+        self.storage.set_notify_every(printer_index, notify_type, value, initial_value)
+        await reply(f"Recurring camera notifications set every {value} {NOTIFY_EVERY_UNITS[notify_type]} "
+                    f"on Printer {printer_index + 1}.")
+
+    async def cmd_camera(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Owner has full access, claimers can access their printers."""
+        resolved = await self._resolve_printer(update, context.args, owner_any=True, usage="Usage: /camera <printer>")
+        if not resolved:
+            return
+        printer_index, _ = resolved
+        message = update.effective_message
+
+        frame = await self.pm.get_camera_frame(printer_index)
+        if not frame:
+            await message.reply_text(f"Printer {printer_index + 1} is not connected or has no camera frame.")
+            return
+
+        await message.reply_photo(
+            photo=InputFile(frame, filename=f"printer_{printer_index + 1}.jpg"),
+            caption=f"Camera image from Printer {printer_index + 1}",
+        )
+
+    async def cmd_light(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Toggle the printer light (owner or claimer)."""
+        resolved = await self._resolve_printer(update, context.args, owner_any=True, usage="Usage: /light <printer>")
+        if not resolved:
+            return
+        printer_index, _ = resolved
+        reply = update.effective_message.reply_text
+
+        if not self.pm.get_online_printer(printer_index):
+            await reply(f"Printer {printer_index + 1} is not connected.")
+            return
+
+        try:
+            turn_on = not self.pm.is_light_on(printer_index)
+            self.pm.set_light(printer_index, turn_on)
+            await reply(f"Printer {printer_index + 1} light turned {'ON' if turn_on else 'OFF'}.")
         except Exception as e:
-            await update.message.reply_text(f"Failed to toggle light: {e}")
+            await reply(f"Failed to toggle light: {e}")
 
-    app.add_handler(CommandHandler("light", handle_light))
+    async def cmd_unclaim(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Unclaim the print and revert the main chat message."""
+        resolved = await self._resolve_printer(update, context.args, usage="Usage: /unclaim <printer>")
+        if not resolved:
+            return
+        printer_index, _ = resolved
+        await update.effective_message.reply_text(await self._unclaim(context, printer_index))
 
-    # /start command - handles deep links from "Start DM with bot" button
-    async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
+    async def cmd_restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Owner only: reboot a printer and reconnect."""
+        reply = update.effective_message.reply_text
+        if update.effective_user.id != cfg.OWNER_ID:
+            await reply("Only the bot owner can use this command.")
+            return
 
-        # Check if this is a deep link with claim parameter
-        if context.args and context.args[0].startswith("claim_"):
-            printer_index = int(context.args[0].split("_")[1])
+        printer_count = len(self.pm)
+        if not context.args:
+            await reply(f"Usage: /restart <printer>\nAvailable printers: 1-{printer_count}")
+            return
+        if not context.args[0].isdigit():
+            await reply("Please provide a valid printer number.")
+            return
+        printer_index = int(context.args[0]) - 1
+        if not 0 <= printer_index < printer_count:
+            await reply(f"Invalid printer number. Use 1-{printer_count}")
+            return
 
-            session = storage.get_print(printer_index)
-            if not session:
-                await update.message.reply_text("This print session has ended.")
-                return
+        await reply(await self._restart(printer_index))
 
-            # Verify this user is the one who claimed it
-            if session.claimed_by != user.id:
-                await update.message.reply_text("You are not the claimer of this print.")
-                return
+    # --- Callback buttons ---
 
-            # Get current print info
-            print_info = _get_print_info(printer_manager, printer_index)
+    async def cb_claim(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        user = query.from_user
+        printer_index = _callback_index(query)
 
-            # Show preference selection
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("Main Chat (Recommended)", callback_data=f"dm_pref_{printer_index}_chat"),
-                    InlineKeyboardButton("Send to DM only", callback_data=f"dm_pref_{printer_index}_dm")
-                ],
-                [
-                    InlineKeyboardButton("Unclaim Print", callback_data=f"unclaim_{printer_index}"),
-                    InlineKeyboardButton("Help", callback_data="help")
-                ]
-            ])
+        session = self.storage.get_print(printer_index)
+        if not session:
+            await query.answer()
+            await query.edit_message_text(ui.SESSION_ENDED)
+            return
+        if session.claimed_by:
+            await query.answer(f"Already claimed by {session.claimed_username}", show_alert=True)
+            return
+        await query.answer()
 
-            await update.message.reply_text(
-                f"You claimed Printer {printer_index + 1}!{print_info}\n\nWhere would you like to receive the finished print image?",
-                reply_markup=keyboard
+        username = f"@{user.username}" if user.username else user.full_name
+        session = self.storage.claim_print(printer_index, user.id, username)
+        claimed_text = ui.claimed_text(printer_index, session)
+
+        try:
+            await self._send_claim_dm(context, user.id, printer_index)
+            await query.edit_message_text(claimed_text)
+        except Exception:
+            # User hasn't started a conversation with the bot yet
+            await query.edit_message_text(
+                f"{claimed_text}\n\n{username}, please start a conversation with the bot to configure your print settings:",
+                reply_markup=ui.start_dm_keyboard(context.bot.username, printer_index),
             )
 
-            # Update the main chat message to remove the "Start DM" button
-            print_time_str = f" (print time: {session.print_time})" if session.print_time else ""
-            new_text = f"Printer {printer_index + 1} started by {session.claimed_username}{print_time_str}"
-            try:
-                # Parse chat_id (may be in format "chat_id/thread_id")
-                chat_id = session.chat_id.split("/")[0] if "/" in session.chat_id else session.chat_id
-                await context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=session.message_id,
-                    text=new_text
-                )
-            except Exception as e:
-                print(f'Exception: could not edit main chat message {session.message_id} on /start deep link: {e}')
-        else:
-            # Generic start message
-            await update.message.reply_text(
-                "Welcome! Use the buttons in the main chat to claim prints."
-            )
+    async def _claimer_session(self, query: CallbackQuery, printer_index: int):
+        """Return the session if the button presser is its claimer, otherwise answer the query and return None."""
+        session = self.storage.get_print(printer_index)
+        if not session:
+            await query.answer()
+            await query.edit_message_text(ui.SESSION_ENDED)
+            return None
+        if session.claimed_by != query.from_user.id:
+            await query.answer("You are not the claimer of this print.", show_alert=True)
+            return None
+        await query.answer()
+        return session
 
-    app.add_handler(CommandHandler("start", handle_start))
+    async def cb_dm_preference(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        printer_index = _callback_index(query, 2)
+        if not await self._claimer_session(query, printer_index):
+            return
 
+        self.storage.set_dm_preference(printer_index, query.data.split("_")[3])
+        text, keyboard = ui.settings_message(printer_index, self.storage.get_print(printer_index))
+        await query.edit_message_text(text, reply_markup=keyboard)
 
-def _get_print_info(printer_manager, printer_index: int) -> str:
-    """Get current print info for a printer."""
-    if not printer_manager:
-        return ""
+    async def cb_layer2_toggle(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        printer_index = _callback_index(query)
+        session = await self._claimer_session(query, printer_index)
+        if not session:
+            return
 
-    printer = printer_manager.get_printer(printer_index)
-    if not printer or not printer.mqtt_client_ready():
-        return ""
+        self.storage.set_layer2_notify(printer_index, not session.layer2_notify)
+        text, keyboard = ui.settings_message(printer_index, self.storage.get_print(printer_index))
+        await query.edit_message_text(text, reply_markup=keyboard)
 
-    progress = printer.get_percentage()
-    time_left = printer_manager._format_print_time(printer.get_time())
-    layer = printer.current_layer_num()
-    total_layers = printer.total_layer_num()
+    async def cb_unclaim(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        printer_index = _callback_index(query)
+        if not await self._claimer_session(query, printer_index):
+            return
+        reply_text = await self._unclaim(context, printer_index)
+        # Unclaim buttons also appear on photo notifications, which can't be edited as text
+        if query.message and query.message.text:
+            await query.edit_message_text(reply_text)
+        elif query.message:
+            await query.message.reply_text(reply_text)
 
-    return f"\n\nCurrent status:\n- Progress: {progress}%\n- Time remaining: {time_left}\n- Layer: {layer}/{total_layers}"
+    async def cb_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        await query.message.reply_text(ui.HELP_TEXT)
 
-
-async def handle_claim(query, user, storage: Storage, message_service, context, printer_manager=None):
-    data = query.data
-    printer_index = int(data.split("_")[1])
-
-    session = storage.get_print(printer_index)
-    if not session:
-        await query.edit_message_text("This print session has ended.")
-        return
-
-    if session.claimed_by:
-        await query.answer(f"Already claimed by {session.claimed_username}", show_alert=True)
-        return
-
-    username = f"@{user.username}" if user.username else user.full_name
-    session = storage.claim_print(printer_index, user.id, username)
-
-    # Edit the original message to show who claimed it
-    print_time_str = f" (print time: {session.print_time})" if session.print_time else ""
-    new_text = f"Printer {printer_index + 1} started by {username}{print_time_str}"
-
-    # Get current print info
-    print_info = _get_print_info(printer_manager, printer_index)
-
-    # Try to DM the user asking for their preference
-    dm_keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Main Chat (Recommended)", callback_data=f"dm_pref_{printer_index}_chat"),
-            InlineKeyboardButton("Send to DM only", callback_data=f"dm_pref_{printer_index}_dm")
-        ],
-        [
-            InlineKeyboardButton("Unclaim Print", callback_data=f"unclaim_{printer_index}"),
-            InlineKeyboardButton("Help", callback_data="help")
-        ]
-    ])
-
-    try:
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=f"You claimed Printer {printer_index + 1}!{print_info}\n\nWhere would you like to receive the finished print image?",
-            reply_markup=dm_keyboard
-        )
-        await query.edit_message_text(new_text)
-    except Exception:
-        # User hasn't started a conversation with the bot yet
-        bot_username = context.bot.username
-        start_dm_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Start DM with bot", url=f"https://t.me/{bot_username}?start=claim_{printer_index}")]
-        ])
-        await query.edit_message_text(
-            f"{new_text}\n\n{username}, please start a conversation with the bot to configure your print settings:",
-            reply_markup=start_dm_keyboard
-        )
+    async def cb_restart_printer(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Restart printer button (owner only)."""
+        query = update.callback_query
+        if query.from_user.id != cfg.OWNER_ID:
+            await query.answer("Only the owner can restart printers.", show_alert=True)
+            return
+        await query.answer()
+        await query.edit_message_text(await self._restart(_callback_index(query)))
 
 
-def _build_settings_message(printer_index: int, dm_preference: str, layer2_notify: bool) -> tuple[str, InlineKeyboardMarkup]:
-    printer_num = printer_index + 1
-
-    if dm_preference == "chat":
-        destination = "main chat"
-    else:
-        destination = "here privately"
-
-    layer2_status = "ON" if layer2_notify else "OFF"
-    layer2_btn_text = "Layer 2 Notify: ON" if layer2_notify else "Layer 2 Notify: OFF"
-
-    text = (
-        f"Settings for Printer {printer_num}:\n"
-        f"- Finished image: {destination}\n"
-        f"- Layer 2 notification: {layer2_status}\n\n"
-        f"You can use /camera {printer_num} to check on your print while it's active."
-    )
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(layer2_btn_text, callback_data=f"layer2_toggle_{printer_index}")],
-        [
-            InlineKeyboardButton("Unclaim Print", callback_data=f"unclaim_{printer_index}"),
-            InlineKeyboardButton("Help", callback_data="help")
-        ]
-    ])
-
-    return text, keyboard
-
-
-async def handle_dm_preference(query, user, storage: Storage, message_service):
-    data = query.data
-    parts = data.split("_")
-    printer_index = int(parts[2])
-    preference = parts[3]  # "chat" or "dm"
-
-    storage.set_dm_preference(printer_index, preference)
-
-    session = storage.get_print(printer_index)
-    layer2_notify = session.layer2_notify if session else True
-
-    text, keyboard = _build_settings_message(printer_index, preference, layer2_notify)
-    await query.edit_message_text(text, reply_markup=keyboard)
-
-
-async def handle_layer2_toggle(query, user, storage: Storage):
-    data = query.data
-    printer_index = int(data.split("_")[2])
-
-    session = storage.get_print(printer_index)
-    if not session:
-        await query.edit_message_text("This print session has ended.")
-        return
-
-    # Toggle the current value
-    new_value = not session.layer2_notify
-    storage.set_layer2_notify(printer_index, new_value)
-
-    text, keyboard = _build_settings_message(printer_index, session.dm_preference, new_value)
-    await query.edit_message_text(text, reply_markup=keyboard)
-
-
-async def handle_unclaim_callback(query, user, storage: Storage, context):
-    data = query.data
-    printer_index = int(data.split("_")[1])
-
-    session = storage.get_print(printer_index)
-    if not session:
-        await query.edit_message_text("This print session has ended.")
-        return
-
-    # Verify this user is the one who claimed it
-    if session.claimed_by != user.id:
-        await query.answer("You are not the claimer of this print.", show_alert=True)
-        return
-
-    # Store message info before unclaiming
-    message_id = session.message_id
-    chat_id = session.chat_id.split("/")[0] if "/" in session.chat_id else session.chat_id
-    print_time = session.print_time
-
-    # Unclaim the print
-    storage.unclaim_print(printer_index)
-
-    # Restore the main chat message with the Claim Print button
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Claim Print", callback_data=f"claim_{printer_index}")]
-    ])
-
-    print_time_str = f" (print time: {print_time})" if print_time else ""
-    message = f"Printer {printer_index + 1} has started printing.{print_time_str}"
-
-    try:
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=message,
-            reply_markup=keyboard
-        )
-        await query.edit_message_text(f"You have unclaimed Printer {printer_index + 1}.")
-    except Exception:
-        await query.edit_message_text(f"Unclaimed Printer {printer_index + 1}, but could not update the main chat message.")
-
-
-async def handle_help_callback(query):
-    help_text = (
-        "Available commands:\n"
-        "/help - Show this help message\n"
-        "/info [printer] - Show info about your print\n"
-        "/notify [printer] <layer> - Send a one-time notification at a layer\n"
-        "/notify [printer] <percent>% - Send a one-time notification at a percentage\n"
-        "/notify_every [printer] layers|time|percent <number> - Send recurring camera snapshots\n"
-        "/notify_every [printer] off - Disable recurring camera snapshots\n"
-        "/camera [printer] - View camera image from your printer\n"
-        "/unclaim [printer] - Unclaim your print\n\n"
-        "Note: [printer] is required when you have multiple prints claimed."
-    )
-    await query.answer()
-    await query.message.reply_text(help_text)
-
-
-async def handle_restart_printer(query, user, printer_manager):
-    """Handle restart printer button callback (owner only)."""
-    if user.id != cfg.OWNER_ID:
-        await query.answer("Only the owner can restart printers.", show_alert=True)
-        return
-
-    printer_index = int(query.data.split("_")[2])
-
-    if not printer_manager:
-        await query.edit_message_text("Printer manager not available.")
-        return
-
-    printer = printer_manager.get_printer(printer_index)
-    if not printer:
-        await query.edit_message_text(f"Printer {printer_index + 1} not found.")
-        return
-
-    try:
-        printer.reboot()
-        printer.disconnect()
-        printer.connect()
-        await query.edit_message_text(f"Printer {printer_index + 1} reconnection initiated.")
-    except Exception as e:
-        await query.edit_message_text(f"Failed to restart Printer {printer_index + 1}: {e}")
+def setup_handlers(app: Application, storage: Storage, message_service: MessageService, printer_manager: PrinterManager):
+    BotHandlers(storage, message_service, printer_manager).register(app)

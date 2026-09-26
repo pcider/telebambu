@@ -1,18 +1,31 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import os
 import time
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
-from telegram.constants import ParseMode
+from typing import TYPE_CHECKING
+
+from telegram import Bot, InlineKeyboardMarkup, InputFile
+from telegram.constants import MessageLimit, ParseMode
+from telegram.error import BadRequest
 
 from data import Storage
+from data.storage import PrintSession
+from . import ui
 from .telegram_bot import BotContext
 import config as cfg
+
+if TYPE_CHECKING:
+    from printers.manager import PrinterSnapshot
 
 # Load error codes from JSON
 _ERROR_CODES_FILE = os.path.join(os.path.dirname(__file__), '..', 'error_codes.json')
 with open(_ERROR_CODES_FILE, 'r') as _f:
     ERROR_CODES: dict[str, str] = json.load(_f)
+
+LOG_THROTTLE = 5  # seconds between messages to the log chat
+FAIL_MESSAGE_TTL = 60 * 60 * 24  # delete failure notifications after 1 day
 
 
 def lookup_error(code) -> str:
@@ -29,375 +42,226 @@ class MessageService:
         self.ctx = context
         self.storage = storage
         self._prev_status_message = ''
-        self._last_log_time = 0
-        self._message_buffer = ''
+        self._last_log_time = 0.0
+        self._log_buffer: list[str] = []
+        self._background_tasks: set[asyncio.Task] = set()
 
-    def format_print_time(self, total_mins: int) -> str:
-        hrs = total_mins // 60
-        mins = total_mins % 60
-        return f'{hrs}h{mins}m' if hrs > 0 else f'{mins}m'
+    # --- Low-level helpers ---
 
-    async def send_print_started(self, printer_index: int, print_time: str, total_layers: int = 0) -> int:
-        # Delete previous "started printing" message for this printer to prevent spam
-        old_session = self.storage.get_print(printer_index)
-        if old_session:
-            try:
-                await self.bot.delete_message(
-                    chat_id=old_session.chat_id,
-                    message_id=old_session.message_id
-                )
-            except Exception:
-                pass  # Message may have already been deleted
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Claim Print", callback_data=f"claim_{printer_index}")]
-        ])
-
-        message = f"Printer {printer_index + 1} has started printing. (time: {print_time}, layers: {total_layers})"
-
-        msg = await self.bot.send_message(
-            chat_id=self.ctx.chat_id,
-            text=message,
-            message_thread_id=self.ctx.thread_id,
-            reply_markup=keyboard
+    async def _send(self, chat_id, text: str, image: bytes | bytearray | None = None,
+                    thread_id: int | None = None, reply_markup: InlineKeyboardMarkup | None = None):
+        """Send a photo with caption if an image is given, otherwise a text message."""
+        if image:
+            return await self.bot.send_photo(
+                chat_id=chat_id,
+                photo=InputFile(bytes(image)),
+                caption=text[:MessageLimit.CAPTION_LENGTH],
+                message_thread_id=thread_id,
+                reply_markup=reply_markup,
+            )
+        return await self.bot.send_message(
+            chat_id=chat_id,
+            text=text[:MessageLimit.MAX_TEXT_LENGTH],
+            message_thread_id=thread_id,
+            reply_markup=reply_markup,
         )
 
-        self.storage.start_print(printer_index, msg.message_id, self.ctx.chat_id, print_time)
+    async def _send_main(self, text: str, image=None, reply_markup=None):
+        return await self._send(self.ctx.chat_id, text, image, self.ctx.thread_id, reply_markup)
+
+    async def _delete(self, chat_id, message_id: int):
+        try:
+            await self.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception:
+            pass  # Message may have already been deleted
+
+    async def _delete_started_message(self, session: PrintSession | None):
+        """Remove a print's "started printing" message to prevent spam."""
+        if session:
+            await self._delete(session.chat_id, session.message_id)
+
+    def _spawn(self, coro):
+        """Run a coroutine in the background, keeping a reference so it isn't garbage-collected."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    # --- Print lifecycle ---
+
+    async def send_print_started(self, printer_index: int, print_time: str, total_layers: int = 0) -> int:
+        await self._delete_started_message(self.storage.get_print(printer_index))
+
+        # Build the text from a provisional session so it matches later edits (unclaim etc.)
+        draft = PrintSession(message_id=0, chat_id=self.ctx.chat_id, printer_index=printer_index,
+                             print_time=print_time, total_layers=total_layers)
+        msg = await self._send_main(ui.started_text(printer_index, draft), reply_markup=ui.claim_keyboard(printer_index))
+
+        self.storage.start_print(printer_index, msg.message_id, self.ctx.chat_id, print_time, total_layers)
         return msg.message_id
 
-    async def send_print_finished(self, printer_index: int, image: bytes | bytearray | None):
-        if isinstance(image, bytearray):
-            image = bytes(image)
-
+    async def send_print_finished(self, printer_index: int, image: bytes | None):
         session = self.storage.get_print(printer_index)
-
-        # Delete the "started printing" message to prevent spam
-        if session:
-            try:
-                await self.bot.delete_message(
-                    chat_id=session.chat_id,
-                    message_id=session.message_id
-                )
-            except Exception:
-                pass  # Message may have already been deleted
-
-        message = f"Printer {printer_index + 1} has finished printing."
+        await self._delete_started_message(session)
 
         if session and session.claimed_by:
             message = f"Printer {printer_index + 1} has finished printing. ({session.claimed_username})"
-
-            if session.dm_preference == "dm":
-                # Send to DM only
-                if image:
-                    await self.bot.send_photo(
-                        chat_id=session.claimed_by,
-                        photo=InputFile(image),
-                        caption=message
-                    )
-                else:
-                    await self.bot.send_message(
-                        chat_id=session.claimed_by,
-                        text=message
-                    )
-                # End the print session
-                self.storage.end_print(printer_index)
-                return
-
-        # Send to main chat (default behavior)
-        if image:
-            await self.bot.send_photo(
-                chat_id=self.ctx.chat_id,
-                photo=InputFile(image),
-                caption=message,
-                message_thread_id=self.ctx.thread_id
-            )
         else:
-            await self.bot.send_message(
-                chat_id=self.ctx.chat_id,
-                text=message,
-                message_thread_id=self.ctx.thread_id
-            )
+            message = f"Printer {printer_index + 1} has finished printing."
+
+        if session and session.claimed_by and session.dm_preference == "dm":
+            await self._send(session.claimed_by, message, image)
+        else:
+            await self._send_main(message, image)
 
         self.storage.end_print(printer_index)
 
-    async def send_layer2_notification(self, printer_index: int, image: bytes | bytearray | None = None):
-        session = self.storage.get_print(printer_index)
-        if not session or not session.claimed_by:
-            return
-
-        if not session.layer2_notify or session.layer2_notified:
-            return
-
-        if isinstance(image, bytearray):
-            image = bytes(image)
-
-        message = f"Printer {printer_index + 1}: Layer 2 complete! Your print is progressing well."
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Unclaim Print", callback_data=f"unclaim_{printer_index}")]
-        ])
-
-        if image:
-            await self.bot.send_photo(
-                chat_id=session.claimed_by,
-                photo=InputFile(image),
-                caption=message,
-                reply_markup=keyboard
-            )
-        else:
-            await self.bot.send_message(
-                chat_id=session.claimed_by,
-                text=message,
-                reply_markup=keyboard
-            )
-
-        self.storage.mark_layer2_notified(printer_index)
-
-    async def send_custom_layer_notification(self, printer_index: int, current_layer: int, image: bytes | bytearray | None = None):
-        session = self.storage.get_print(printer_index)
-        if not session or not session.claimed_by:
-            return
-
-        if not session.notify_layer or session.notify_layer_notified:
-            return
-
-        if current_layer < session.notify_layer:
-            return
-
-        if isinstance(image, bytearray):
-            image = bytes(image)
-
-        # Show message based on notification type
-        if session.notify_type == "percent":
-            message = f"Printer {printer_index + 1}: {session.notify_original_value}% reached!"
-        else:
-            message = f"Printer {printer_index + 1}: Layer {session.notify_layer} reached!"
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Unclaim Print", callback_data=f"unclaim_{printer_index}")]
-        ])
-
-        if image:
-            await self.bot.send_photo(
-                chat_id=session.claimed_by,
-                photo=InputFile(image),
-                caption=message,
-                reply_markup=keyboard
-            )
-        else:
-            await self.bot.send_message(
-                chat_id=session.claimed_by,
-                text=message,
-                reply_markup=keyboard
-            )
-
-        self.storage.mark_notify_layer_notified(printer_index)
-
-    async def send_periodic_camera_notification(self, printer_index: int, printer,
-                                                 trigger_value: int | None = None,
-                                                 image: bytes | bytearray | None = None):
-        session = self.storage.get_print(printer_index)
-        if not session or not session.claimed_by or not session.notify_every_type:
-            return
-
-        if isinstance(image, bytearray):
-            image = bytes(image)
-        if not image:
-            return
-
-        progress = printer.get_percentage()
-        current_layer = printer.current_layer_num()
-        total_layers = printer.total_layer_num()
-        if session.notify_every_type == "layers":
-            detail = f"layer {current_layer}/{total_layers}"
-        elif session.notify_every_type == "percent":
-            detail = f"{progress}% complete"
-        else:
-            detail = f"layer {current_layer}/{total_layers}, {progress}% complete"
-
-        message = f"Printer {printer_index + 1}: Camera update ({detail})."
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Unclaim Print", callback_data=f"unclaim_{printer_index}")]
-        ])
-
-        if image:
-            await self.bot.send_photo(
-                chat_id=session.claimed_by,
-                photo=InputFile(image),
-                caption=message,
-                reply_markup=keyboard
-            )
-        else:
-            await self.bot.send_message(
-                chat_id=session.claimed_by,
-                text=message,
-                reply_markup=keyboard
-            )
-
-        self.storage.mark_notify_every_sent(printer_index, trigger_value)
-
-    async def send_print_failed(self, printer_index: int, error_code, image: bytes | bytearray | None = None):
+    async def send_print_failed(self, printer_index: int, error_code, image: bytes | None = None):
         """Send print failure notification to the print owner (if claimed) and bot owner.
         Deletes the 'started printing' message and cleans up the session."""
-        if isinstance(image, bytearray):
-            image = bytes(image)
-
         session = self.storage.get_print(printer_index)
-        error_desc = lookup_error(error_code)
-        message = f"Printer {printer_index + 1} failed!\n{error_desc}"
+        await self._delete_started_message(session)
 
-        # Delete the "started printing" message
-        if session:
-            try:
-                await self.bot.delete_message(
-                    chat_id=session.chat_id,
-                    message_id=session.message_id
-                )
-            except Exception:
-                pass
-
-        sent_messages = []
+        message = f"Printer {printer_index + 1} failed!\n{lookup_error(error_code)}"
+        targets = []  # (chat_id, thread_id, label)
 
         # Notify the print owner (claimer) based on their DM preference
         if session and session.claimed_by:
+            if session.dm_preference == "dm":
+                targets.append((session.claimed_by, None, 'claimer'))
+            else:
+                targets.append((self.ctx.chat_id, self.ctx.thread_id, 'claimer'))
+
+        # Always notify the bot owner, avoiding a double-send if the claimer is the owner
+        if not (session and session.claimed_by == cfg.OWNER_ID):
+            targets.append((cfg.OWNER_ID, None, 'owner'))
+
+        sent_messages = []
+        for chat_id, thread_id, label in targets:
             try:
-                if session.dm_preference == "dm":
-                    target_chat = session.claimed_by
-                    thread_id = None
-                else:
-                    target_chat = self.ctx.chat_id
-                    thread_id = self.ctx.thread_id
-
-                if image:
-                    msg = await self.bot.send_photo(
-                        chat_id=target_chat,
-                        photo=InputFile(image),
-                        caption=message,
-                        message_thread_id=thread_id
-                    )
-                else:
-                    msg = await self.bot.send_message(
-                        chat_id=target_chat,
-                        text=message,
-                        message_thread_id=thread_id
-                    )
-                sent_messages.append((target_chat, msg.message_id))
+                msg = await self._send(chat_id, message, image, thread_id)
+                sent_messages.append((chat_id, msg.message_id))
             except Exception as e:
-                print(f'Failed to send fail notification to claimer: {e}')
+                print(f'Failed to send fail notification to {label}: {e}')
 
-        # Always notify the bot owner
-        owner_id = cfg.OWNER_ID
-        # Avoid double-sending if the claimer is the owner
-        if not (session and session.claimed_by == owner_id):
-            try:
-                if image:
-                    msg = await self.bot.send_photo(
-                        chat_id=owner_id,
-                        photo=InputFile(image),
-                        caption=message
-                    )
-                else:
-                    msg = await self.bot.send_message(
-                        chat_id=owner_id,
-                        text=message
-                    )
-                sent_messages.append((owner_id, msg.message_id))
-            except Exception as e:
-                print(f'Failed to send fail notification to owner: {e}')
-
-        # End the print session
         if session:
             self.storage.end_print(printer_index)
 
         # Delete fail messages after a delay so users can read them
         async def _delete_later():
-            await asyncio.sleep(60*60*24)  # 1 day
+            await asyncio.sleep(FAIL_MESSAGE_TTL)
             for chat_id, msg_id in sent_messages:
-                try:
-                    await self.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                except Exception:
-                    pass
+                await self._delete(chat_id, msg_id)
 
-        asyncio.create_task(_delete_later())
+        self._spawn(_delete_later())
 
-    async def send_update_message(self, message: str, image: bytes | bytearray | None = None):
-        if isinstance(image, bytearray):
-            image = bytes(image)
+    # --- Claimer notifications (sent to the claimer's DM) ---
 
-        if image:
-            await self.bot.send_photo(
-                chat_id=self.ctx.chat_id,
-                photo=InputFile(image),
-                caption=message,
-                message_thread_id=self.ctx.thread_id
-            )
+    async def _notify_claimer(self, printer_index: int, message: str, image: bytes | None):
+        session = self.storage.get_print(printer_index)
+        if session and session.claimed_by:
+            await self._send(session.claimed_by, message, image, reply_markup=ui.unclaim_keyboard(printer_index))
+
+    async def send_layer2_notification(self, printer_index: int, image: bytes | None = None):
+        await self._notify_claimer(
+            printer_index, f"Printer {printer_index + 1}: Layer 2 complete! Your print is progressing well.", image)
+        self.storage.mark_layer2_notified(printer_index)
+
+    async def send_custom_layer_notification(self, printer_index: int, image: bytes | None = None):
+        session = self.storage.get_print(printer_index)
+        if not session:
+            return
+        if session.notify_type == "percent":
+            message = f"Printer {printer_index + 1}: {session.notify_original_value}% reached!"
         else:
-            await self.bot.send_message(
-                chat_id=self.ctx.chat_id,
-                text=message,
-                message_thread_id=self.ctx.thread_id
-            )
+            message = f"Printer {printer_index + 1}: Layer {session.notify_layer} reached!"
+        await self._notify_claimer(printer_index, message, image)
+        self.storage.mark_notify_layer_notified(printer_index)
 
-    async def log_message(self, message: str, image: bytes | bytearray | None = None, stdout_only: bool = False):
+    async def send_periodic_camera_notification(self, printer_index: int, snap: PrinterSnapshot,
+                                                trigger_value: int | None = None, image: bytes | None = None):
+        session = self.storage.get_print(printer_index)
+        if not session:
+            return
+        if session.notify_every_type == "layers":
+            detail = f"layer {snap.layer}/{snap.total_layers}"
+        elif session.notify_every_type == "percent":
+            detail = f"{snap.progress}% complete"
+        else:
+            detail = f"layer {snap.layer}/{snap.total_layers}, {snap.progress}% complete"
+
+        suffix = "" if image else " Camera frame unavailable."
+        await self._notify_claimer(printer_index, f"Printer {printer_index + 1}: Camera update ({detail}).{suffix}", image)
+        self.storage.mark_notify_every_sent(printer_index, trigger_value)
+
+    # --- Owner alerts ---
+
+    async def send_stale_camera_alert(self, printer_index: int):
+        await self._send(
+            cfg.OWNER_ID,
+            f"Printer {printer_index + 1} is IDLE but camera is not updating. Consider restarting.",
+            reply_markup=ui.restart_keyboard(printer_index),
+        )
+
+    # --- Log chat ---
+
+    async def log_message(self, message: str, image: bytes | None = None, stdout_only: bool = False):
         print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {message}')
 
         if stdout_only or not self.ctx.log_chat_id:
             return
 
-        cur_time = time.time()
-        self._message_buffer += f'\n{message}'
+        self._log_buffer.append(message)
+        # Messages with an image are sent straight away so the image isn't dropped
+        await self.flush_logs(image, force=image is not None)
 
-        if cur_time - self._last_log_time < 5:
+    async def flush_logs(self, image: bytes | None = None, force: bool = False):
+        """Send buffered log lines, at most once every LOG_THROTTLE seconds unless forced."""
+        if not self._log_buffer:
+            return
+        now = time.time()
+        if not force and now - self._last_log_time < LOG_THROTTLE:
             return
 
-        self._last_log_time = cur_time
+        text = '\n'.join(self._log_buffer)
+        self._log_buffer.clear()
+        self._last_log_time = now
 
-        if isinstance(image, bytearray):
-            image = bytes(image)
+        # Keep the most recent lines if the buffer outgrew Telegram's limits
+        limit = MessageLimit.CAPTION_LENGTH if image else MessageLimit.MAX_TEXT_LENGTH
+        try:
+            await self._send(self.ctx.log_chat_id, text[-limit:], image, self.ctx.log_thread_id)
+        except Exception as e:
+            print(f'Failed to send log message: {e}')
 
-        if image:
-            await self.bot.send_photo(
-                chat_id=self.ctx.log_chat_id,
-                photo=InputFile(image),
-                caption=self._message_buffer,
-                message_thread_id=self.ctx.log_thread_id
-            )
-        else:
-            await self.bot.send_message(
-                chat_id=self.ctx.log_chat_id,
-                text=self._message_buffer,
-                message_thread_id=self.ctx.log_thread_id
-            )
-
-        self._message_buffer = ''
+    # --- Status message ---
 
     async def update_status_message(self, message: str):
         if message == self._prev_status_message:
             return
 
-        self._prev_status_message = message
+        message_id = self.storage.status_message_id
+        if message_id is not None:
+            try:
+                await self.bot.edit_message_text(
+                    chat_id=self.ctx.status_chat_id,
+                    message_id=message_id,
+                    text=message,
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                )
+                self._prev_status_message = message
+                return
+            except BadRequest as e:
+                if 'not modified' in str(e).lower():
+                    self._prev_status_message = message
+                    return
+                # Message was probably deleted; fall through and post a new one
+                print(f'Could not edit status message, sending a new one: {e}')
 
-        if self.storage.status_message_id is None:
-            msg = await self.bot.send_message(
-                chat_id=self.ctx.status_chat_id,
-                text=message,
-                message_thread_id=self.ctx.status_thread_id,
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
-            self.storage.set_status_message_id(msg.message_id)
-        else:
-            # try:
-            await self.bot.edit_message_text(
-                chat_id=self.ctx.status_chat_id,
-                message_id=self.storage.status_message_id,
-                text=message,
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
-            # except Exception:
-                # Message might have been deleted, create a new one
-                # msg = await self.bot.send_message(
-                #     chat_id=self.ctx.status_chat_id,
-                #     text=message,
-                #     message_thread_id=self.ctx.status_thread_id,
-                #     parse_mode=ParseMode.MARKDOWN_V2
-                # )
-                # self.storage.set_status_message_id(msg.message_id)
+        msg = await self.bot.send_message(
+            chat_id=self.ctx.status_chat_id,
+            text=message,
+            message_thread_id=self.ctx.status_thread_id,
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        self.storage.set_status_message_id(msg.message_id)
+        self._prev_status_message = message

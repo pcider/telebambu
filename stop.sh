@@ -1,3 +1,5 @@
 #!/bin/sh
 
-kill $(cat telebambu.pid)
+cd "$(dirname "$0")"
+
+kill "$(cat telebambu.pid)" && rm -f telebambu.pid
