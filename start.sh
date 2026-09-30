@@ -1,8 +1,8 @@
 #!/bin/sh
 
 cd "$(dirname "$0")"
-
+#sleep 60
 echo "--- BOT RESTARTED at $(date) ---" >> telebambu.log
-# exec replaces this shell with python, so $$ is the bot's PID for stop.sh
-echo $$ > telebambu.pid
-exec python3 -u main.py >>telebambu.log 2>&1
+# Run in the background and record the bot's own PID ($!) for stop.sh
+python3 -u main.py >>telebambu.log 2>&1 &
+echo $! > telebambu.pid

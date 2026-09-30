@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 
 DEFAULT_UPDATE_INTERVAL = 5  # seconds
 PRINT_STARTED_DELAY = 2  # seconds to let the printer update its time estimate
+# Only auto-restart printers in these states, so a running print is never interrupted
+NOT_PRINTING_STATES = (GcodeState.IDLE, GcodeState.FINISH)
 
 
 class PrinterMonitor:
@@ -59,16 +61,21 @@ class PrinterMonitor:
                 print(f'Error handling event {event.type} for printer {i + 1}: {e}')
 
     async def _check_stale_camera(self, i: int):
-        """If an idle printer has no camera frame it might need a restart; tell the owner once."""
+        """Auto-restart an idle/finished printer whose camera has stopped sending frames (once per outage)."""
         printer = self.pm.get_online_printer(i)
         if not printer:
             return
 
         has_frame = self.pm.has_camera_frame(i)
-        if printer.get_state() == GcodeState.IDLE and not has_frame:
+        state = printer.get_state()
+        if not has_frame and state in NOT_PRINTING_STATES:
             if i not in self._stale_camera_reported:
                 self._stale_camera_reported.add(i)
-                await self.ms.send_stale_camera_alert(i)
+                await self.ms.log_message(f"Printer {i + 1} has no camera ({state}). Auto-restarting...")
+                try:
+                    self.pm.restart(i)
+                except Exception as e:
+                    await self.ms.log_message(f"Failed to auto-restart Printer {i + 1}: {e}")
         elif has_frame:
             # Camera recovered, clear the flag
             self._stale_camera_reported.discard(i)
