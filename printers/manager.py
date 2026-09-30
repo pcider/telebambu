@@ -227,7 +227,7 @@ class PrinterManager:
         if prev_print_state != PrintStatus.UNKNOWN and prev_print_state != print_state:
             yield event(EventType.STATE_CHANGED, prev_print=prev_print_state, new_print=print_state)
 
-    def get_status_text(self) -> str:
+    def get_status_lines(self) -> list[str]:
         lines = []
         for i in range(len(self)):
             snap = self.snapshot(i)
@@ -242,8 +242,10 @@ class PrinterManager:
             if not self.has_camera_frame(i):
                 line += ' [NO CAM]'
             lines.append(line)
+        return lines
 
-        body = '\n'.join(lines)
+    def get_status_text(self) -> str:
+        body = '\n'.join(self.get_status_lines())
         return (
             'Printer Statuses:```c\n'
             f'{body}\n'

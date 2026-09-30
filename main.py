@@ -5,7 +5,7 @@ import config as cfg
 from data import Storage
 from bot import create_application, get_bot_context, setup_handlers, MessageService
 from printers import PrinterManager, PrinterMonitor
-from printers.monitor import DEFAULT_UPDATE_INTERVAL
+from printers.monitor import DEFAULT_UPDATE_INTERVAL, DEFAULT_STATS_LOG_INTERVAL
 
 
 async def main():
@@ -16,7 +16,8 @@ async def main():
     setup_handlers(app, storage, message_service, printer_manager)
     monitor = PrinterMonitor(printer_manager, message_service,
                              getattr(cfg, 'UPDATE_INTERVAL', DEFAULT_UPDATE_INTERVAL),
-                             getattr(cfg, 'AUTO_RESTART_PRINTERS', True))
+                             getattr(cfg, 'AUTO_RESTART_PRINTERS', True),
+                             getattr(cfg, 'STATS_LOG_INTERVAL', DEFAULT_STATS_LOG_INTERVAL))
 
     # Stop cleanly on Ctrl+C or `kill` (stop.sh)
     stop = asyncio.Event()

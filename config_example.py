@@ -10,6 +10,8 @@ TELEGRAM_BOT_TOKEN = '1234567890:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'
 
 UPDATE_INTERVAL = 3  # seconds
 
+STATS_LOG_INTERVAL = 60 * 60  # seconds between update timing/status reports, None to disable
+
 AUTO_RESTART_PRINTERS = True  # Set to False to only log stale-camera printers instead of rebooting them
 
 PRINTERS = [

@@ -16,13 +16,14 @@ PRINT_STARTED_DELAY = 2  # seconds to let the printer update its time estimate
 # Don't flag a missing camera frame until this long after a printer connects/restarts,
 # since the camera stream can take a while to establish (TLS handshake, auth, retries)
 CAMERA_STARTUP_GRACE = 30  # seconds
+DEFAULT_STATS_LOG_INTERVAL = 60 * 60  # seconds between update timing/status reports
 # Only auto-restart printers in these states, so a running print is never interrupted
 NOT_PRINTING_STATES = (GcodeState.IDLE, GcodeState.FINISH)
 
 
 class PrinterMonitor:
     def __init__(self, printer_manager: PrinterManager, message_service: MessageService, interval: float = DEFAULT_UPDATE_INTERVAL,
-                 auto_restart: bool = True):
+                 auto_restart: bool = True, stats_interval: float | None = DEFAULT_STATS_LOG_INTERVAL):
         self.pm = printer_manager
         self.ms = message_service
         self.storage = message_service.storage
@@ -30,14 +31,45 @@ class PrinterMonitor:
         self.auto_restart = auto_restart
         # Printers already reported as having a stale camera, to avoid spam
         self._stale_camera_reported: set[int] = set()
+        # Time between tick starts, so event loop stalls show up on top of the sleep interval
+        self.stats_interval = stats_interval
+        self._stats_since = time.monotonic()
+        self._last_tick_at: float | None = None
+        self._tick_gaps: list[float] = []
 
     async def run(self):
         while True:
             await asyncio.sleep(self.interval)
+            self._record_tick()
             try:
+                await self.log_stats_if_due()
                 await self.tick()
             except Exception as e:
                 print(f'Monitor tick failed: {e}')
+
+    def _record_tick(self):
+        now = time.monotonic()
+        if self._last_tick_at is not None:
+            self._tick_gaps.append(now - self._last_tick_at)
+        self._last_tick_at = now
+
+    async def log_stats_if_due(self):
+        """Log min/avg/max time between updates and every printer's status, then start a new window."""
+        if not self.stats_interval or time.monotonic() - self._stats_since < self.stats_interval:
+            return
+
+        gaps = self._tick_gaps
+        if gaps:
+            timing = (f'{len(gaps)} updates, avg {sum(gaps) / len(gaps):.2f}s, '
+                      f'min {min(gaps):.2f}s, max {max(gaps):.2f}s')
+        else:
+            timing = 'no updates'
+        window = format_duration(round((time.monotonic() - self._stats_since) / 60))
+        status = '\n'.join(self.pm.get_status_lines())
+        await self.ms.log_message(f'Update stats (last {window}): {timing}\n{status}')
+
+        self._tick_gaps = []
+        self._stats_since = time.monotonic()
 
     async def tick(self):
         await self.pm.reconnect_if_needed(self.ms.log_message)
