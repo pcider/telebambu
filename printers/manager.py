@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -15,6 +16,19 @@ PAUSE_NOTIFY_COOLDOWN = 60  # seconds
 PRE_PRINT_STATES = (GcodeState.FINISH, GcodeState.IDLE, GcodeState.PREPARE)
 # States where the printer is not in use
 IDLE_STATES = (GcodeState.IDLE, GcodeState.FINISH, GcodeState.UNKNOWN)
+
+
+class _CameraRetryNoiseFilter(logging.Filter):
+    """Drop the camera thread's network errors, which bambulabs_api logs on every
+    5-second retry while a printer is offline. PrinterManager logs outages itself,
+    once per outage; other library errors (e.g. a wrong access code) still get through."""
+    NOISE_PREFIXES = ('Error occurred: [Errno', 'Error in socket:')
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.getMessage().startswith(self.NOISE_PREFIXES)
+
+
+logging.getLogger('bambulabs_api').addFilter(_CameraRetryNoiseFilter())
 
 
 def to_int(value, default: int = 0) -> int:
@@ -91,18 +105,22 @@ class PrinterManager:
             if not printer:
                 continue
             if printer.mqtt_client_connected():
-                # Printer reconnected, clear the flag
-                self._logged_disconnected.discard(i)
+                if i in self._logged_disconnected:
+                    self._logged_disconnected.discard(i)
+                    await log_fn(f'Printer {i + 1} is back online')
                 continue
 
-            # Only log once per disconnect event
-            if i not in self._logged_disconnected:
+            # Only log once per outage; retries continue silently until it's back
+            first_failure = i not in self._logged_disconnected
+            if first_failure:
                 self._logged_disconnected.add(i)
-                await log_fn(f'Printer {i + 1} not connected, reconnecting')
+                ip = self.printer_configs[i][2]
+                await log_fn(f'Printer {i + 1} ({ip}) is unreachable, retrying quietly until it reconnects')
             try:
                 printer.connect()
             except Exception as e:
-                print(f'Failed to reconnect printer {i + 1}: {e}')
+                if first_failure:
+                    print(f'Failed to reconnect printer {i + 1}: {e}')
 
     def disconnect_all(self):
         for i, printer in enumerate(self.printers):
