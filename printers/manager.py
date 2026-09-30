@@ -83,6 +83,7 @@ class PrinterManager:
         self.last_paused_time: list[float] = [0.0] * count
         self._camera_locks = [asyncio.Lock() for _ in range(count)]
         self._logged_disconnected: set[int] = set()
+        self.connected_at: list[float] = [0.0] * count
 
     def __len__(self) -> int:
         return len(self.printer_configs)
@@ -97,6 +98,7 @@ class PrinterManager:
                 # reconnect_if_needed() can keep retrying it.
                 self.printers[i] = bl.Printer(ip, access_code, serial)
                 self.printers[i].connect()
+                self.connected_at[i] = time.time()
             except Exception as e:
                 await log_fn(f'Failed to connect to printer {i + 1}: {e}')
 
@@ -118,6 +120,7 @@ class PrinterManager:
                 await log_fn(f'Printer {i + 1} ({ip}) is unreachable, retrying quietly until it reconnects')
             try:
                 printer.connect()
+                self.connected_at[i] = time.time()
             except Exception as e:
                 if first_failure:
                     print(f'Failed to reconnect printer {i + 1}: {e}')
@@ -138,6 +141,7 @@ class PrinterManager:
         printer.reboot()
         printer.disconnect()
         printer.connect()
+        self.connected_at[index] = time.time()
 
     # --- Accessors ---
 
@@ -145,6 +149,9 @@ class PrinterManager:
         if 0 <= index < len(self.printers):
             return self.printers[index]
         return None
+
+    def seconds_since_connect(self, index: int) -> float:
+        return time.time() - self.connected_at[index]
 
     def get_online_printer(self, index: int) -> Printer | None:
         """The printer if it's connected and has reported state, else None."""

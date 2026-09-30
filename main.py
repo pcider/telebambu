@@ -15,7 +15,8 @@ async def main():
     message_service = MessageService(app.bot, get_bot_context(), storage)
     setup_handlers(app, storage, message_service, printer_manager)
     monitor = PrinterMonitor(printer_manager, message_service,
-                             getattr(cfg, 'UPDATE_INTERVAL', DEFAULT_UPDATE_INTERVAL))
+                             getattr(cfg, 'UPDATE_INTERVAL', DEFAULT_UPDATE_INTERVAL),
+                             getattr(cfg, 'AUTO_RESTART_PRINTERS', True))
 
     # Stop cleanly on Ctrl+C or `kill` (stop.sh)
     stop = asyncio.Event()
@@ -39,7 +40,10 @@ async def main():
             await message_service.flush_logs(force=True)
             await app.updater.stop()
             await app.stop()
-            printer_manager.disconnect_all()
+            # Disabled: printer.disconnect() can hang forever joining the camera thread
+            # if it's stuck in a blocking socket connect to an unreachable printer,
+            # which blocks the whole event loop and prevents shutdown.
+            # printer_manager.disconnect_all()
 
 
 if __name__ == '__main__':

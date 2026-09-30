@@ -10,6 +10,8 @@ TELEGRAM_BOT_TOKEN = '1234567890:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'
 
 UPDATE_INTERVAL = 3  # seconds
 
+AUTO_RESTART_PRINTERS = True  # Set to False to only log stale-camera printers instead of rebooting them
+
 PRINTERS = [
     ('1', 'AA:BB:CC:DD:EE:FF', '192.168.1.123', '12345678', '0123456789ABCDE'),
     ('2', '00:11:22:33:44:55', '192.168.1.124', '12345679', '123456789ABCDEF'),

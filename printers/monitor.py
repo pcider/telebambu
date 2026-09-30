@@ -13,16 +13,21 @@ if TYPE_CHECKING:
 
 DEFAULT_UPDATE_INTERVAL = 5  # seconds
 PRINT_STARTED_DELAY = 2  # seconds to let the printer update its time estimate
+# Don't flag a missing camera frame until this long after a printer connects/restarts,
+# since the camera stream can take a while to establish (TLS handshake, auth, retries)
+CAMERA_STARTUP_GRACE = 30  # seconds
 # Only auto-restart printers in these states, so a running print is never interrupted
 NOT_PRINTING_STATES = (GcodeState.IDLE, GcodeState.FINISH)
 
 
 class PrinterMonitor:
-    def __init__(self, printer_manager: PrinterManager, message_service: MessageService, interval: float = DEFAULT_UPDATE_INTERVAL):
+    def __init__(self, printer_manager: PrinterManager, message_service: MessageService, interval: float = DEFAULT_UPDATE_INTERVAL,
+                 auto_restart: bool = True):
         self.pm = printer_manager
         self.ms = message_service
         self.storage = message_service.storage
         self.interval = interval
+        self.auto_restart = auto_restart
         # Printers already reported as having a stale camera, to avoid spam
         self._stale_camera_reported: set[int] = set()
 
@@ -65,12 +70,17 @@ class PrinterMonitor:
         printer = self.pm.get_online_printer(i)
         if not printer:
             return
+        if self.pm.seconds_since_connect(i) < CAMERA_STARTUP_GRACE:
+            return
 
         has_frame = self.pm.has_camera_frame(i)
         state = printer.get_state()
         if not has_frame and state in NOT_PRINTING_STATES:
             if i not in self._stale_camera_reported:
                 self._stale_camera_reported.add(i)
+                if not self.auto_restart:
+                    await self.ms.log_message(f"Printer {i + 1} has no camera ({state}). Auto-restart disabled, skipping.")
+                    return
                 await self.ms.log_message(f"Printer {i + 1} has no camera ({state}). Auto-restarting...")
                 try:
                     self.pm.restart(i)
