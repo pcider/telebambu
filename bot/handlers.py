@@ -43,7 +43,6 @@ class BotHandlers:
             r"^dm_pref_\d+_(chat|dm)$": self.cb_dm_preference,
             r"^layer2_toggle_\d+$": self.cb_layer2_toggle,
             r"^unclaim_\d+$": self.cb_unclaim,
-            r"^restart_printer_\d+$": self.cb_restart_printer,
             r"^help$": self.cb_help,
         }
         for pattern, callback in callbacks.items():
@@ -449,15 +448,6 @@ class BotHandlers:
         query = update.callback_query
         await query.answer()
         await query.message.reply_text(ui.HELP_TEXT)
-
-    async def cb_restart_printer(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Restart printer button (owner only)."""
-        query = update.callback_query
-        if query.from_user.id != cfg.OWNER_ID:
-            await query.answer("Only the owner can restart printers.", show_alert=True)
-            return
-        await query.answer()
-        await query.edit_message_text(await self._restart(_callback_index(query)))
 
 
 def setup_handlers(app: Application, storage: Storage, message_service: MessageService, printer_manager: PrinterManager):

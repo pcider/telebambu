@@ -193,15 +193,6 @@ class MessageService:
         await self._notify_claimer(printer_index, f"Printer {printer_index + 1}: Camera update ({detail}).{suffix}", image)
         self.storage.mark_notify_every_sent(printer_index, trigger_value)
 
-    # --- Owner alerts ---
-
-    async def send_stale_camera_alert(self, printer_index: int):
-        await self._send(
-            cfg.OWNER_ID,
-            f"Printer {printer_index + 1} is IDLE but camera is not updating. Consider restarting.",
-            reply_markup=ui.restart_keyboard(printer_index),
-        )
-
     # --- Log chat ---
 
     async def log_message(self, message: str, image: bytes | None = None, stdout_only: bool = False):

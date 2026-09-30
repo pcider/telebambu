@@ -49,10 +49,6 @@ def unclaim_keyboard(printer_index: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("Unclaim Print", callback_data=f"unclaim_{printer_index}")]])
 
 
-def restart_keyboard(printer_index: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Restart Printer", callback_data=f"restart_printer_{printer_index}")]])
-
-
 def start_dm_keyboard(bot_username: str, printer_index: int) -> InlineKeyboardMarkup:
     url = f"https://t.me/{bot_username}?start=claim_{printer_index}"
     return InlineKeyboardMarkup([[InlineKeyboardButton("Start DM with bot", url=url)]])

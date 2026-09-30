@@ -62,9 +62,6 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    # Update interval in seconds
    UPDATE_INTERVAL = 3
 
-   # Whether to send a message when printing starts
-   UPDATE_START_PRINTING = False
-
    # Printer configuration
    # Format: (display_name, mac_address, ip_address, access_code, serial_number)
    PRINTERS = [

@@ -9,7 +9,6 @@ OWNER_ID = 1234567890  # Bot owner user ID (can use /camera command)
 TELEGRAM_BOT_TOKEN = '1234567890:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'
 
 UPDATE_INTERVAL = 3  # seconds
-UPDATE_START_PRINTING = False  # Send message when printing starts
 
 PRINTERS = [
     ('1', 'AA:BB:CC:DD:EE:FF', '192.168.1.123', '12345678', '0123456789ABCDE'),
