@@ -1,7 +1,9 @@
+from telegram import BotCommand, BotCommandScopeChatMember
 from telegram.ext import Application, ContextTypes
 from dataclasses import dataclass
 
 import config as cfg
+from bot.commands import get_commands
 
 
 @dataclass
@@ -43,6 +45,30 @@ def parse_chat_id(chat_id_str: str | None) -> tuple[str | None, int | None]:
 
 def create_application() -> Application:
     return Application.builder().token(cfg.TELEGRAM_BOT_TOKEN).build()
+
+
+async def set_command_menu(bot) -> None:
+    """Configure separate Telegram slash-command menus for users and the owner."""
+    user_commands = [
+        BotCommand(command.name, command.description)
+        for command in get_commands()
+    ]
+    owner_commands = [
+        BotCommand(command.name, command.description)
+        for command in get_commands(owner_commands=True)
+    ]
+
+    await bot.set_my_commands(user_commands)
+
+    chat_id, _ = parse_chat_id(cfg.CHAT_ID)
+    if chat_id is not None:
+        await bot.set_my_commands(
+            owner_commands,
+            scope=BotCommandScopeChatMember(
+                chat_id=chat_id,
+                user_id=cfg.OWNER_ID,
+            ),
+        )
 
 
 def get_bot_context() -> BotContext:
