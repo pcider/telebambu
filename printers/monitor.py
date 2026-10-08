@@ -115,7 +115,7 @@ class PrinterMonitor:
                     return
                 await self.ms.log_message(f"Printer {i + 1} has no camera ({state}). Auto-restarting...")
                 try:
-                    self.pm.restart(i)
+                    await self.pm.restart(i)
                 except Exception as e:
                     await self.ms.log_message(f"Failed to auto-restart Printer {i + 1}: {e}")
         elif has_frame:

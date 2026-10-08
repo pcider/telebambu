@@ -129,7 +129,7 @@ class BotHandlers:
 
     async def _restart(self, printer_index: int) -> str:
         try:
-            self.pm.restart(printer_index)
+            await self.pm.restart(printer_index)
             return f"Printer {printer_index + 1} reconnection initiated."
         except Exception as e:
             return f"Failed to restart Printer {printer_index + 1}: {e}"

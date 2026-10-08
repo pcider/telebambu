@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -12,6 +13,8 @@ CAMERA_POLL_INTERVAL = 2  # seconds
 CAMERA_MAX_POLLS = 10
 # Minimum gap between two pause notifications for the same printer
 PAUSE_NOTIFY_COOLDOWN = 60  # seconds
+# Upper bound on waiting for a printer restart, so a hang in bambulabs_api can't freeze the bot
+RESTART_TIMEOUT = 60  # seconds
 # States a printer can be in right before a new print starts running
 PRE_PRINT_STATES = (GcodeState.FINISH, GcodeState.IDLE, GcodeState.PREPARE)
 # States where the printer is not in use
@@ -37,6 +40,36 @@ def to_int(value, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+async def run_blocking(fn, timeout: float):
+    """Run a blocking call in a daemon thread and wait at most `timeout` seconds.
+
+    Unlike asyncio.to_thread, a call that never returns doesn't tie up the default
+    executor, which asyncio.run() waits on at exit, so shutdown can't hang on it.
+    Raises TimeoutError if the call is still running when the timeout expires.
+    """
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+
+    def settle(result=None, exc=None):
+        if future.done():  # we already gave up waiting
+            return
+        if exc is not None:
+            future.set_exception(exc)
+        else:
+            future.set_result(result)
+
+    def worker():
+        try:
+            result = fn()
+        except BaseException as e:
+            loop.call_soon_threadsafe(settle, None, e)
+        else:
+            loop.call_soon_threadsafe(settle, result)
+
+    threading.Thread(target=worker, name=f'blocking-{fn.__name__}', daemon=True).start()
+    return await asyncio.wait_for(future, timeout)
 
 
 def format_duration(total_mins) -> str:
@@ -133,14 +166,30 @@ class PrinterManager:
                 except Exception as e:
                     print(f'Failed to disconnect printer {i + 1}: {e}')
 
-    def restart(self, index: int):
-        """Reboot a printer and re-establish the connection. Raises on failure."""
+    async def restart(self, index: int):
+        """Reboot a printer and re-establish the connection. Raises on failure.
+
+        The library calls are blocking (stopping the camera joins its thread, which can
+        hang), so they run off the event loop with a timeout and never freeze the bot.
+        """
         printer = self.get_printer(index)
         if not printer:
             raise LookupError(f'Printer {index + 1} not found.')
-        printer.reboot()
-        printer.disconnect()
-        printer.connect()
+
+        def restart_printer():
+            printer.reboot()
+            # Bring MQTT back first, so status updates resume even if stopping the
+            # camera (the step that can hang) never returns.
+            printer.mqtt_stop()
+            printer.mqtt_start()
+            printer.camera_stop()
+            printer.camera_start()
+
+        try:
+            await run_blocking(restart_printer, RESTART_TIMEOUT)
+        except TimeoutError:
+            raise TimeoutError(f'still not done after {RESTART_TIMEOUT}s, '
+                               'the camera thread is probably stuck') from None
         self.connected_at[index] = time.time()
 
     # --- Accessors ---

@@ -1,11 +1,25 @@
 import asyncio
+import faulthandler
 import signal
+import socket
 
 import config as cfg
 from data import Storage
 from bot import create_application, get_bot_context, setup_handlers, MessageService
 from printers import PrinterManager, PrinterMonitor
 from printers.monitor import DEFAULT_UPDATE_INTERVAL, DEFAULT_STATS_LOG_INTERVAL
+
+# bambulabs_api's camera thread opens its socket and does the TLS handshake with no
+# timeout, so a printer whose camera service wedges (or that reboots mid-handshake)
+# can block that thread forever, and anything joining it hangs too. A default timeout
+# makes those calls fail and retry instead. paho-mqtt and httpx set their own timeouts,
+# so this only affects sockets created without one.
+SOCKET_DEFAULT_TIMEOUT = 15  # seconds
+socket.setdefaulttimeout(SOCKET_DEFAULT_TIMEOUT)
+
+# `kill -USR1 <pid>` dumps every thread's stack to stderr (telebambu.log).
+# Registered at the C level, so it still works while the event loop is blocked.
+faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 
 async def main():
