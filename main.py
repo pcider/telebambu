@@ -3,7 +3,7 @@ import asyncio
 import config as cfg
 from data import Storage
 from bot import create_application, setup_handlers, MessageService
-from bot.telegram_bot import get_bot_context
+from bot.telegram_bot import get_bot_context, set_command_menu
 from printers import PrinterManager, monitor_loop
 
 
@@ -12,6 +12,8 @@ async def main():
     printer_manager = PrinterManager(cfg.PRINTERS)
     app = create_application()
     bot_context = get_bot_context()
+
+    await set_command_menu(app.bot)
 
     # Create message service
     message_service = MessageService(app.bot, bot_context, storage)
