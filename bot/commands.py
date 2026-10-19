@@ -27,6 +27,7 @@ COMMANDS = (
     CommandDefinition("light", "Toggle printer light"),
     CommandDefinition("staff", "See the owner, admins and mods"),
     CommandDefinition("forcereclaim", "Give a print to someone else", Role.ADMIN),
+    CommandDefinition("forceunclaim", "Unclaim someone else's print", Role.ADMIN),
     CommandDefinition("restart", "Reboot printers", Role.ADMIN),
     CommandDefinition("restartall", "Reboot every printer", Role.ADMIN),
     CommandDefinition("home", "Home the axes of idle printers", Role.ADMIN),
@@ -36,6 +37,6 @@ COMMANDS = (
 )
 
 
-def get_commands(role: Role = Role.USER) -> tuple[CommandDefinition, ...]:
-    """Return the commands available to a role."""
-    return tuple(command for command in COMMANDS if role >= command.min_role)
+def get_commands(role: Role = Role.USER, disabled: frozenset[str] = frozenset()) -> tuple[CommandDefinition, ...]:
+    """Return the commands available to a role, leaving out disabled ones."""
+    return tuple(command for command in COMMANDS if role >= command.min_role and command.name not in disabled)

@@ -18,7 +18,7 @@ from printers import files
 from . import ui
 from .messages import MessageService
 from .telegram_bot import get_bot_context, parse_chat_id
-from settings import PrinterConfig, Settings
+from settings import DISABLEABLE_COMMANDS, PrinterConfig, Settings
 
 NOTIFY_USAGE = "Usage: /notify [printer] <layer> or /notify [printer] <percent>%"
 NOTIFY_EVERY_USAGE = "Usage: /notify_every [printer] layers <number>, time <minutes>, percent <number>, or off"
@@ -118,6 +118,7 @@ class BotHandlers:
             "claim": self.cmd_claim,
             "unclaim": self.cmd_unclaim,
             "forcereclaim": self.cmd_forcereclaim,
+            "forceunclaim": self.cmd_forceunclaim,
             "restart": self.cmd_restart,
             "restartall": self.cmd_restartall,
             "home": self.cmd_home,
@@ -127,10 +128,12 @@ class BotHandlers:
             "printer": self.cmd_printer,
         }
         for name, callback in commands.items():
+            if name in DISABLEABLE_COMMANDS:
+                callback = self._unless_disabled(name, callback)
             app.add_handler(CommandHandler(name, callback))
         # Commands in a document's caption don't reach CommandHandler
         app.add_handler(MessageHandler(filters.Document.ALL & filters.CaptionRegex(r"^/print(@\w+)?(\s|$)"),
-                                       self.cmd_print_caption))
+                                       self._unless_disabled("print", self.cmd_print_caption)))
 
         callbacks = {
             _callback_pattern("claim", "claim"): self.cb_claim,
@@ -142,6 +145,15 @@ class BotHandlers:
         }
         for pattern, callback in callbacks.items():
             app.add_handler(CallbackQueryHandler(callback, pattern=pattern))
+
+    def _unless_disabled(self, name: str, callback):
+        """Wrap a command so it refuses to run while config.yml disables it."""
+        async def guarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            if self.settings.is_disabled(name):
+                await update.effective_message.reply_text(f"/{name} is disabled on this bot.")
+                return
+            await callback(update, context)
+        return guarded
 
     # --- Users & roles ---
 
@@ -330,7 +342,8 @@ class BotHandlers:
             print(f'Exception: could not edit main chat message {session.message_id} on /start deep link: {e}')
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.effective_message.reply_text(ui.help_text(self.storage.get_role(update.effective_user.id)))
+        await update.effective_message.reply_text(ui.help_text(self.storage.get_role(update.effective_user.id),
+                                                               self.settings.disabled()))
 
     async def cmd_info(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
@@ -847,6 +860,36 @@ class BotHandlers:
         await reply(f"Printer {printer_num} now belongs to {new_name}."
                     + ("" if dm_sent else f" They need to start a chat with @{context.bot.username} to get its notifications."))
 
+    async def cmd_forceunclaim(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin only: unclaim someone else's print, so anyone can claim it again."""
+        reply = update.effective_message.reply_text
+        if not await self._require_admin(update):
+            return
+        args = context.args
+        if len(args) != 1 or not args[0].isdigit():
+            await reply("Usage: /forceunclaim <printer>")
+            return
+        printer_num = int(args[0])
+        session = self.storage.get_print(printer_num)
+        if not session:
+            await reply(f"Printer {printer_num} has no active print.")
+            return
+        if not session.claimed_by:
+            await reply(f"Printer {printer_num} isn't claimed.")
+            return
+        old_claimer, old_name = session.claimed_by, session.claimed_username
+        unclaimed = await self._unclaim(context, printer_num)
+
+        admin_name = self.storage.display_name(update.effective_user.id)
+        try:
+            await context.bot.send_message(chat_id=old_claimer, text=f"{admin_name} unclaimed Printer {printer_num}.")
+        except Exception:
+            pass
+        await self.ms.log_message(f"Force unclaim: {admin_name} unclaimed Printer {printer_num} from {old_name}.")
+        # _unclaim's reply is worded for the claimer; keep its warning if the main chat wasn't updated
+        await reply(f"Unclaimed Printer {printer_num} from {old_name}."
+                    if unclaimed.startswith("You have") else unclaimed)
+
     async def cmd_unclaim(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Unclaim the print and revert the main chat message."""
         resolved = await self._resolve_printer(update, context.args, usage="Usage: /unclaim <printer>")
@@ -1295,7 +1338,8 @@ class BotHandlers:
     async def cb_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
-        await query.message.reply_text(ui.help_text(self.storage.get_role(query.from_user.id)))
+        await query.message.reply_text(ui.help_text(self.storage.get_role(query.from_user.id),
+                                                    self.settings.disabled()))
 
 
 def setup_handlers(app: Application, storage: Storage, message_service: MessageService, printer_manager: PrinterManager,

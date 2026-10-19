@@ -70,6 +70,14 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    saved to `config.yml`, so it also survives restarts. To undo it, stop the bot, change
    `update_interval` in `config.yml` by hand, and start it again.
 
+   `disabled_commands` turns individual commands off: set `print`, `speed`, `skip`, `staff`,
+   `forcereclaim`, `restart`, `restartall` or `home` to `true`. Disabled commands are hidden from
+   `/help` and the command menu and reply that they are disabled. `staff: true` also leaves the
+   owner as the only role: admins and mods are treated as ordinary users, but their roles stay in
+   `data.json` and come back when `staff` is set to `false` again.
+
+   Changes take effect after a restart.
+
    **Finding your printer information:**
    - **IP Address**: Check your router's DHCP client list or the printer's network settings
    - **Access Code**: Found in the printer's LAN settings
@@ -163,6 +171,7 @@ sudo systemctl start telebambu
 **Admins** (the owner can do all of these too)
 - `/camera`, `/light`, `/stop_at`, `/pause`, `/resume`, `/speed` and `/skip` work on any printer
 - `/forcereclaim <printer> <user>` - Give a print to another user (logged)
+- `/forceunclaim <printer>` - Unclaim someone else's print so anyone can claim it (logged)
 - `/restart <printer> [printer ...]` / `/restartall` - Reboot and reconnect printers
 - `/home <printer> [printer ...]` - Home the axes of idle printers (refused while printing)
 - `/print <printer> [plate] [ams|ext]` - Remote printing, for testing: send a sliced `.3mf` (up to 20 MB) with this as its caption, or reply to one with it. The bot uploads it to the printer's SD card and starts the plate. Filament N in the project is printed from AMS tray N; `ext` uses the external spool instead

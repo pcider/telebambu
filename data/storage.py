@@ -79,6 +79,9 @@ class Storage:
         self.status_message_id: Optional[int] = None
         self.roles: dict[int, Role] = {}  # user_id -> Role, only staff are stored
         self.users: dict[int, KnownUser] = {}  # user_id -> last seen username/name
+        # False while /staff is disabled: only the owner keeps a role. Stored roles are kept,
+        # so admins and mods get theirs back when it is enabled again.
+        self.roles_enabled = True
         self._load()
 
     def _load(self):
@@ -306,7 +309,10 @@ class Storage:
         return str(user_id)
 
     def get_role(self, user_id: int) -> Role:
-        return self.roles.get(user_id, Role.USER)
+        role = self.roles.get(user_id, Role.USER)
+        if not self.roles_enabled and role != Role.OWNER:
+            return Role.USER
+        return role
 
     def set_role(self, user_id: int, role: Role):
         if role == Role.USER:
@@ -334,8 +340,10 @@ class Storage:
 
     def staff(self) -> dict[Role, list[int]]:
         grouped = {role: [] for role in (Role.OWNER, Role.ADMIN, Role.MOD)}
-        for user_id, role in self.roles.items():
-            grouped[role].append(user_id)
+        for user_id in self.roles:
+            role = self.get_role(user_id)
+            if role != Role.USER:
+                grouped[role].append(user_id)
         return grouped
 
     # --- Status message ---
