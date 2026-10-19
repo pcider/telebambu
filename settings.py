@@ -23,6 +23,11 @@ HEADER = """\
 """
 
 
+# Commands that config.yml can turn off one by one. A disabled /staff also leaves the owner
+# as the only role: admins and mods act as users until it is turned back on.
+DISABLEABLE_COMMANDS = ('print', 'speed', 'skip', 'staff', 'forcereclaim', 'restart', 'restartall', 'home')
+
+
 @dataclass
 class PrinterConfig:
     ip: str
@@ -41,8 +46,16 @@ class Settings:
     update_interval: float = 5
     stats_log_interval: Optional[float] = 60 * 60
     auto_restart_printers: bool = True
+    # One flag per command in DISABLEABLE_COMMANDS; true turns that command off
+    disabled_commands: dict[str, bool] = field(default_factory=lambda: dict.fromkeys(DISABLEABLE_COMMANDS, False))
     printers: dict[int, PrinterConfig] = field(default_factory=dict)
     path: str = field(default=CONFIG_FILE, repr=False, compare=False)
+
+    def is_disabled(self, command: str) -> bool:
+        return bool(self.disabled_commands.get(command))
+
+    def disabled(self) -> frozenset[str]:
+        return frozenset(command for command in DISABLEABLE_COMMANDS if self.is_disabled(command))
 
     def save(self):
         data = asdict(self)
@@ -63,6 +76,15 @@ def _chat(value) -> Optional[str]:
     return None if value is None else str(value)
 
 
+def _disabled_commands(data: dict) -> dict[str, bool]:
+    """Every disableable command's flag, defaulting to enabled when config.yml leaves it out."""
+    given = data.get('disabled_commands') or {}
+    unknown = sorted(set(given) - set(DISABLEABLE_COMMANDS))
+    if unknown:
+        print(f"Ignoring unknown disabled_commands in config: {', '.join(map(str, unknown))}")
+    return {command: bool(given.get(command, False)) for command in DISABLEABLE_COMMANDS}
+
+
 def _from_dict(data: dict, path: str) -> Settings:
     printers = {
         int(num): PrinterConfig(ip=str(p['ip']), access_code=str(p['access_code']),
@@ -76,6 +98,7 @@ def _from_dict(data: dict, path: str) -> Settings:
         status_chat_id=_chat(data['status_chat_id']),
         owner_id=int(owner_id) if owner_id else None,
         log_chat_id=_chat(data.get('log_chat_id')),
+        disabled_commands=_disabled_commands(data),
         printers=printers,
         path=path,
         # Only keys that are set, so missing ones fall back to the Settings defaults

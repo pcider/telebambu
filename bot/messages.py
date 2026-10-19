@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from telegram import Bot, InlineKeyboardMarkup, InputFile
 from telegram.constants import MessageLimit, ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, Forbidden
 
 from data import Storage
 from data.storage import PrintSession
@@ -35,6 +35,8 @@ class MessageService:
         self._last_log_time = 0.0
         self._log_buffer: list[str] = []
         self._background_tasks: set[asyncio.Task] = set()
+        # Claimers whose DM Telegram refused; their notifications go to the main chat until they /start
+        self._dm_unreachable: set[int] = set()
 
     # --- Low-level helpers ---
 
@@ -59,6 +61,36 @@ class MessageService:
     async def _send_main(self, text: str, image=None, reply_markup=None):
         return await self._send(self.ctx.chat_id, text, image, self.ctx.thread_id, reply_markup)
 
+    async def _send_claimer_dm(self, session: PrintSession, text: str, image=None, reply_markup=None,
+                               group_fallback: bool = True):
+        """DM the claimer, posting in the main chat instead when Telegram refuses the DM.
+        Returns None if nothing was sent (no fallback wanted)."""
+        user_id = session.claimed_by
+        if user_id not in self._dm_unreachable:
+            try:
+                return await self._send(user_id, text, image, reply_markup=reply_markup)
+            except (Forbidden, BadRequest) as e:
+                # A bot cannot start a DM; the user must /start it first (or unblock it).
+                # Other BadRequests (e.g. a bad caption) would fail in the main chat too.
+                if isinstance(e, BadRequest) and 'chat not found' not in str(e).lower():
+                    raise
+                print(f'DM to {user_id} refused, using the main chat until they /start the bot: {e}')
+                self._dm_unreachable.add(user_id)
+                # Don't forward DM-only camera/unclaim controls into the shared chat.
+                name = session.claimed_username or f'user {user_id}'
+                note = f'For {name}: DM unavailable. Open the bot and send /start, or unblock it.'
+                if not group_fallback:
+                    return await self._send_main(note)
+                return await self._send_main(f'{text}\n{note}', image)
+        # Already told to /start: skip the doomed DM and don't repeat the note
+        if group_fallback:
+            return await self._send_main(text, image)
+        return None
+
+    def mark_dm_reachable(self, user_id: int):
+        """The user has opened a DM with the bot, so DM them again."""
+        self._dm_unreachable.discard(user_id)
+
     async def _delete(self, chat_id, message_id: int):
         try:
             await self.bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -79,7 +111,8 @@ class MessageService:
     # --- Print lifecycle ---
 
     async def send_print_started(self, printer_num: int, print_time: str, total_layers: int = 0,
-                                 file_name: str | None = None, catchup: bool = False) -> int:
+                                 file_name: str | None = None, catchup: bool = False,
+                                 names: tuple[str, str] = ('', '')) -> int:
         await self._delete_started_message(self.storage.get_print(printer_num))
 
         # Build the text from a provisional session so it matches later edits (unclaim etc.)
@@ -88,8 +121,9 @@ class MessageService:
                              catchup=catchup)
         msg = await self._send_main(ui.started_text(printer_num, draft), reply_markup=ui.claim_keyboard(printer_num))
 
+        subtask, gcode_file = names
         self.storage.start_print(printer_num, msg.message_id, self.ctx.chat_id, print_time, total_layers, file_name,
-                                 catchup)
+                                 catchup, subtask or None, gcode_file or None)
         return msg.message_id
 
     async def send_print_finished(self, printer_num: int, image: bytes | None, catchup: bool = False):
@@ -103,10 +137,14 @@ class MessageService:
         if catchup:
             message = ui.CATCHUP_TAG + message
 
-        if session and session.claimed_by and session.dm_preference == "dm":
-            await self._send(session.claimed_by, message, image)
-        else:
-            await self._send_main(message, image)
+        try:
+            if session and session.claimed_by and session.dm_preference == "dm":
+                await self._send_claimer_dm(session, message, image)
+            else:
+                await self._send_main(message, image)
+        except Exception as e:
+            # Still end the session, or a later startup catch-up would announce the finish again
+            print(f'Failed to send finish notification for Printer {printer_num}: {e}')
         await self._notify_watchers(session, message, image)
 
         self.storage.end_print(printer_num)
@@ -149,8 +187,12 @@ class MessageService:
         sent_messages = []
         for chat_id, thread_id, label in targets:
             try:
-                msg = await self._send(chat_id, message, image, thread_id)
-                sent_messages.append((chat_id, msg.message_id))
+                if label == 'claimer' and thread_id is None and session.dm_preference == 'dm':
+                    msg = await self._send_claimer_dm(session, message, image)
+                else:
+                    msg = await self._send(chat_id, message, image, thread_id)
+                if msg:
+                    sent_messages.append((msg.chat_id, msg.message_id))
             except Exception as e:
                 print(f'Failed to send fail notification to {label}: {e}')
 
@@ -175,13 +217,15 @@ class MessageService:
             except Exception as e:
                 print(f'Failed to notify watcher {watcher} of Printer {session.printer_num}: {e}')
 
-    async def _notify_claimer(self, printer_num: int, message: str, image: bytes | None):
+    async def _notify_claimer(self, printer_num: int, message: str, image: bytes | None,
+                              group_fallback: bool = True):
         session = self.storage.get_print(printer_num)
         if session and session.claimed_by:
             try:
                 # Camera images get a refresh button so the claimer can check again from the DM
                 keyboard = ui.camera_keyboard(printer_num, unclaim=True) if image else ui.unclaim_keyboard(printer_num)
-                await self._send(session.claimed_by, message, image, reply_markup=keyboard)
+                await self._send_claimer_dm(session, message, image, reply_markup=keyboard,
+                                            group_fallback=group_fallback)
             except Exception as e:
                 print(f'Failed to notify claimer of Printer {printer_num}: {e}')
             await self._notify_watchers(session, message, image)
@@ -218,7 +262,9 @@ class MessageService:
             detail = f"layer {snap.layer}/{snap.total_layers}, {snap.progress}% complete"
 
         suffix = "" if image else " Camera frame unavailable."
-        await self._notify_claimer(printer_num, f"Printer {printer_num}: Camera update ({detail}).{suffix}", image)
+        # Frequent updates would flood the main chat, so they're only ever sent by DM
+        await self._notify_claimer(printer_num, f"Printer {printer_num}: Camera update ({detail}).{suffix}", image,
+                                   group_fallback=False)
         self.storage.mark_notify_every_sent(printer_num, trigger_value)
 
     # --- Log chat ---

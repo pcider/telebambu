@@ -40,7 +40,8 @@ class _CameraRetryNoiseFilter(logging.Filter):
     NOISE_PREFIXES = ('Error occurred: [Errno', 'Error in socket:')
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return not record.getMessage().startswith(self.NOISE_PREFIXES)
+        message = record.getMessage()
+        return message != 'Error occurred: timed out' and not message.startswith(self.NOISE_PREFIXES)
 
 
 logging.getLogger('bambulabs_api').addFilter(_CameraRetryNoiseFilter())
@@ -354,8 +355,15 @@ class PrinterManager:
         printer = self.get_online_printer(num)
         if not printer:
             return ''
-        name = printer.subtask_name() or printer.get_file_name() or ''
-        return name.rsplit('/', 1)[-1]
+        subtask, gcode_file = self.print_names(num)
+        return subtask or gcode_file
+
+    def print_names(self, num: int) -> tuple[str, str]:
+        """The current print's project (subtask) name and gcode file name, either of which may be ''."""
+        printer = self.get_online_printer(num)
+        if not printer:
+            return '', ''
+        return (printer.subtask_name() or '').rsplit('/', 1)[-1], (printer.get_file_name() or '').rsplit('/', 1)[-1]
 
     def details(self, num: int) -> PrinterDetails | None:
         printer = self.get_online_printer(num)

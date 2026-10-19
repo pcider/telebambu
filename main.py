@@ -25,6 +25,7 @@ async def main():
     settings = load_settings()
     storage = Storage()
     storage.ensure_owner(settings.owner_id)
+    storage.roles_enabled = not settings.is_disabled('staff')
     printer_manager = PrinterManager(settings.printers)
     app = create_application(settings)
     await set_command_menu(app.bot, storage, settings)

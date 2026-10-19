@@ -52,27 +52,28 @@ def create_application(settings: Settings) -> Application:
 async def set_command_menu(bot, storage: Storage, settings: Settings) -> None:
     """Configure Telegram slash-command menus: user commands for everyone, plus each
     admin's and the owner's extra commands for them in the main chat."""
-    await bot.set_my_commands(_bot_commands(Role.USER))
+    disabled = settings.disabled()
+    await bot.set_my_commands(_bot_commands(Role.USER, disabled))
 
     chat_id, _ = parse_chat_id(settings.chat_id)
     if chat_id is None:
         return
-    for role, user_ids in storage.staff().items():
-        if role < Role.ADMIN:
-            continue  # mods have no extra commands
-        for user_id in user_ids:
-            try:
-                await bot.set_my_commands(
-                    _bot_commands(role),
-                    scope=BotCommandScopeChatMember(chat_id=chat_id, user_id=user_id),
-                )
-            except Exception as e:
-                # e.g. the user isn't in the main chat; don't block startup over a menu
-                print(f'Failed to set command menu for user {user_id}: {e}')
+    for user_id in storage.roles:
+        role = storage.get_role(user_id)
+        scope = BotCommandScopeChatMember(chat_id=chat_id, user_id=user_id)
+        try:
+            if role >= Role.ADMIN:
+                await bot.set_my_commands(_bot_commands(role, disabled), scope=scope)
+            else:
+                # Mods have no extra commands; also clears a menu left from before /staff was disabled
+                await bot.delete_my_commands(scope=scope)
+        except Exception as e:
+            # e.g. the user isn't in the main chat; don't block startup over a menu
+            print(f'Failed to set command menu for user {user_id}: {e}')
 
 
-def _bot_commands(role: Role) -> list[BotCommand]:
-    return [BotCommand(command.name, command.description) for command in get_commands(role)]
+def _bot_commands(role: Role, disabled: frozenset[str] = frozenset()) -> list[BotCommand]:
+    return [BotCommand(command.name, command.description) for command in get_commands(role, disabled)]
 
 
 def get_bot_context(settings: Settings) -> BotContext:

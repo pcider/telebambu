@@ -33,6 +33,7 @@ ADMIN_HELP = (
     "Admin commands:\n"
     "/camera, /light, /stop_at, /pause, /resume, /speed, /skip <printer> - Work on any printer\n"
     "/forcereclaim <printer> <user> - Give a print to someone else\n"
+    "/forceunclaim <printer> - Unclaim someone else's print\n"
     "/restart <printer> [printer ...] - Reboot printers\n"
     "/restartall - Reboot every printer\n"
     "/home <printer> [printer ...] - Home the axes of idle printers\n"
@@ -53,13 +54,24 @@ OWNER_HELP = (
 )
 
 
-def help_text(role: Role) -> str:
+def _without_disabled(text: str, disabled: frozenset[str]) -> str:
+    """Help text without the lines for disabled commands."""
+    for command in ("speed", "skip"):
+        if command in disabled:
+            text = text.replace(f", /{command}", "")
+    return "\n".join(line for line in text.split("\n")
+                     if line.split(" ", 1)[0].lstrip("/") not in disabled)
+
+
+def help_text(role: Role, disabled: frozenset[str] = frozenset()) -> str:
     """Help listing only the commands the user's role can use."""
     sections = [USER_HELP]
     if role >= Role.ADMIN:
         sections.append(ADMIN_HELP)
     if role == Role.OWNER:
         sections.append(OWNER_HELP)
+    if disabled:
+        sections = [_without_disabled(section, disabled) for section in sections]
     if role > Role.USER:
         sections.append(f"Your role: {role.label}")
     return "\n\n".join(sections)
