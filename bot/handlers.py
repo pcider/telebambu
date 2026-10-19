@@ -299,6 +299,8 @@ class BotHandlers:
         user = update.effective_user
         reply = update.effective_message.reply_text
         arg = context.args[0] if context.args else ""
+        # Opening the DM lets the bot message them again after a refused DM
+        self.ms.mark_dm_reachable(user.id)
 
         match = re.fullmatch(r"claim([-_])(\d+)", arg)
         if not match:
@@ -1285,7 +1287,7 @@ class BotHandlers:
             await query.message.reply_text(f"Printer {printer_num} is not connected or has no camera frame.")
             return
         await query.edit_message_media(
-            media=InputMediaPhoto(InputFile(frame, filename=f"printer_{printer_num}.jpg"),
+            media=InputMediaPhoto(InputFile(frame, filename=f"printer_{printer_num}.jpg", attach=True),
                                   caption=f"Camera image from Printer {printer_num} (updated {time.strftime('%H:%M:%S')})"),
             reply_markup=query.message.reply_markup,
         )

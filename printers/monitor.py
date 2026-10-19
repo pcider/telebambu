@@ -12,6 +12,7 @@ from errors import is_filament_runout, lookup_error
 
 if TYPE_CHECKING:
     from bot.messages import MessageService
+    from data.storage import PrintSession
     from settings import Settings
 
 PRINT_STARTED_DELAY = 2  # seconds to let the printer update its time estimate
@@ -24,6 +25,31 @@ LOW_FILAMENT_PERCENT = 10
 NOT_PRINTING_STATES = (GcodeState.IDLE, GcodeState.FINISH)
 # States where a print is underway
 ACTIVE_PRINT_STATES = (GcodeState.RUNNING, GcodeState.PAUSE)
+
+
+def _print_name(name: str) -> str:
+    """A print name without its file extension, so 'X' and 'X.gcode.3mf' compare equal."""
+    for suffix in ('.gcode.3mf', '.3mf', '.gcode'):
+        if name.lower().endswith(suffix):
+            return name[:-len(suffix)]
+    return name
+
+
+def _is_replaced(session: PrintSession | None, subtask: str, gcode_file: str) -> bool:
+    """Whether the printer's current print is provably a different one from the stored session.
+    Names are only compared like for like, since either can be missing (no subtask before MQTT
+    sends one) and gcode names like 'plate_1.gcode' repeat across projects."""
+    if not session:
+        return False
+    if session.subtask_name and subtask:
+        return _print_name(session.subtask_name) != _print_name(subtask)
+    if session.gcode_file and gcode_file:
+        return _print_name(session.gcode_file) != _print_name(gcode_file)
+    if session.subtask_name or session.gcode_file or not session.file_name:
+        return False  # Nothing comparable, assume the same print
+    # Older sessions stored one name, which could have been either
+    current = {_print_name(n) for n in (subtask, gcode_file) if n}
+    return bool(current) and _print_name(session.file_name) not in current
 
 
 class PrinterMonitor:
@@ -180,7 +206,7 @@ class PrinterMonitor:
         elif event.type == EventType.PRINT_STARTED:
             await asyncio.sleep(PRINT_STARTED_DELAY)
             await self.ms.send_print_started(num, format_duration(printer.get_time()), to_int(printer.total_layer_num()),
-                                             self.pm.file_name(num) or None)
+                                             self.pm.file_name(num) or None, names=self.pm.print_names(num))
 
         elif event.type == EventType.FIRST_SEEN:
             await self._reconcile_on_startup(num, event.data['state'])
@@ -208,13 +234,13 @@ class PrinterMonitor:
         printer = self.pm.get_printer(num)
         session = self.storage.get_print(num)
         current = self.pm.file_name(num) or None
-        # Only a stored name can prove a different print; older sessions have none
-        replaced = bool(session and session.file_name and current and session.file_name != current)
+        names = self.pm.print_names(num)
+        replaced = _is_replaced(session, *names)
         prefix = f'Startup: Printer {num}'
 
         async def announce_current():
             await self.ms.send_print_started(num, format_duration(printer.get_time()), to_int(printer.total_layer_num()),
-                                             file_name=current, catchup=True)
+                                             file_name=current, catchup=True, names=names)
 
         if state in ACTIVE_PRINT_STATES:
             if not session:
