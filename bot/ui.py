@@ -85,7 +85,9 @@ CATCHUP_TAG = "[catchup] "
 
 
 def _print_details(session: PrintSession) -> str:
-    details = [f"file: {session.file_name}"] if session.file_name else []
+    details = []
+    # if session.file_name:
+    #     details.append(f"file: {session.file_name}")
     if session.print_time:
         details.append(f"time: {session.print_time}")
     if session.total_layers:
