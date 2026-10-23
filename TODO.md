@@ -62,8 +62,14 @@ Last reviewed 2026-10-23. Items marked **(ask Max first)** need a design decisio
       button that opens a DM with the bot. The user then sends `/claim <printer>` there themselves.
       Today it's `ui.claim_keyboard` (a callback) plus `ui.start_dm_keyboard` (a `/start claim-N`
       deep link).
-- [ ] **Anonymous prints.** Claimers can set a default so their name isn't shown on their prints.
-      The request was cut off ("claimers can specify defaults to …"), so confirm the details with Max.
+- [ ] **Anonymous prints by default.** A claimer's name must never appear anywhere other users
+      can see it: main chat messages (claimed, finished, failed, the status message), `/info`
+      and other replies in groups, and buttons. Only the log chat shows who claimed what. Enforce
+      this in one place, e.g. a single display helper used by every message outside the log chat,
+      rather than at each call site, and add a test that fails if a claimer's name reaches the main
+      chat. Ask Max whether claimers can opt in to showing their name; the default stays anonymous.
+      Today names are shown, e.g. "Printer N has finished printing. (@user)" and the "DM
+      unavailable" note.
 - [ ] **Log print start/finish and claims/unclaims to the log chat.** Today only pause/resume,
       `/speed`, `/skip`, `/stop_at`, force reclaim/unclaim, restarts, `/home`, `/print`, `/upload`,
       role, config and printer changes are logged. Ordinary claims, unclaims, starts and finishes
