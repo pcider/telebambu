@@ -405,15 +405,21 @@ class PrinterManager:
         slot.objects_cache = (key, objects)
         return objects
 
+    async def upload(self, num: int, filename: str, data: bytes):
+        """Upload a file to the root of the printer's SD card, replacing one with the same name. Raises on failure."""
+        if not self.get_online_printer(num):
+            raise ConnectionError(f'Printer {num} is not connected.')
+        slot = self.slots[num]
+        await asyncio.wait_for(asyncio.to_thread(files.upload, slot.ip, slot.access_code, f'/{filename}', data),
+                               UPLOAD_TIMEOUT)
+
     async def upload_and_print(self, num: int, filename: str, data: bytes, plate: int,
                                use_ams: bool, mapping: list[int]):
         """Upload a sliced 3MF to the printer's SD card and start printing a plate. Raises on failure."""
         printer = self.get_online_printer(num)
         if not printer:
             raise ConnectionError(f'Printer {num} is not connected.')
-        slot = self.slots[num]
-        await asyncio.wait_for(asyncio.to_thread(files.upload, slot.ip, slot.access_code, f'/{filename}', data),
-                               UPLOAD_TIMEOUT)
+        await self.upload(num, filename, data)
         if not printer.start_print(filename, plate, use_ams=use_ams, ams_mapping=mapping):
             raise RuntimeError('the printer did not accept the print command')
 

@@ -24,6 +24,7 @@ auto_restart_printers: true # false to only log idle printers with no camera ins
 # (/forceunclaim can't be turned off, so admins can still free up a printer.)
 disabled_commands:
   print: false
+  upload: false
   speed: false
   skip: false
   staff: false

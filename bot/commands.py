@@ -31,6 +31,7 @@ COMMANDS = (
     CommandDefinition("restart", "Reboot printers", Role.ADMIN),
     CommandDefinition("restartall", "Reboot every printer", Role.ADMIN),
     CommandDefinition("home", "Home the axes of idle printers", Role.ADMIN),
+    CommandDefinition("upload", "Copy a sliced .3mf to a printer", Role.ADMIN),
     CommandDefinition("print", "Print a sliced .3mf (testing)", Role.ADMIN),
     CommandDefinition("printer", "List, add, edit or remove printers", Role.ADMIN),
     CommandDefinition("config", "Show or change bot settings", Role.OWNER),
