@@ -70,7 +70,7 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    saved to `config.yml`, so it also survives restarts. To undo it, stop the bot, change
    `update_interval` in `config.yml` by hand, and start it again.
 
-   `disabled_commands` turns individual commands off: set `print`, `speed`, `skip`, `staff`,
+   `disabled_commands` turns individual commands off: set `print`, `upload`, `speed`, `skip`, `staff`,
    `forcereclaim`, `restart`, `restartall` or `home` to `true`. Disabled commands are hidden from
    `/help` and the command menu and reply that they are disabled. `staff: true` also leaves the
    owner as the only role: admins and mods are treated as ordinary users, but their roles stay in
@@ -174,6 +174,7 @@ sudo systemctl start telebambu
 - `/forceunclaim <printer>` - Unclaim someone else's print so anyone can claim it (logged)
 - `/restart <printer> [printer ...]` / `/restartall` - Reboot and reconnect printers
 - `/home <printer> [printer ...]` - Home the axes of idle printers (refused while printing)
+- `/upload <printer> [force]` - Send a sliced `.3mf` (up to 20 MB) with this as its caption, or reply to one with it, and the bot copies it to the printer's SD card without starting it. It is refused while the printer is printing, paused or preparing, unless you add `force`. Someone at the printer then clears the bed, loads the filament and starts it from the printer's screen. The file name gets an upload timestamp (`name-ddmmyy-hhmmss.3mf`), so earlier uploads are never replaced
 - `/print <printer> [plate] [ams|ext]` - Remote printing, for testing: send a sliced `.3mf` (up to 20 MB) with this as its caption, or reply to one with it. The bot uploads it to the printer's SD card and starts the plate. Filament N in the project is printed from AMS tray N; `ext` uses the external spool instead
 - `/printer list|add|edit|del` - Manage printers in `config.yml`, e.g. `/printer add 25 AA:BB:CC:DD:EE:FF 192.168.1.125 12345678 SERIAL`, `/printer edit 25 ip 192.168.1.126`
 - `/staff edit <mod|user> <user>` - Add or remove mods

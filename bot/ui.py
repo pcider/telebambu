@@ -37,6 +37,8 @@ ADMIN_HELP = (
     "/restart <printer> [printer ...] - Reboot printers\n"
     "/restartall - Reboot every printer\n"
     "/home <printer> [printer ...] - Home the axes of idle printers\n"
+    "/upload <printer> [force] - Copy a sliced .3mf sent with (or replied to by) this command to an idle printer, "
+    "to start from its screen ('force' also works while printing)\n"
     "/print <printer> [plate] [ams|ext] - Print a sliced .3mf sent with (or replied to by) this command (testing)\n"
     "/printer list - Show configured printers\n"
     "/printer add <printer> <mac> <ip> <code> <serial_no> - Add a printer\n"

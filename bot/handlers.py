@@ -38,6 +38,11 @@ PRINTER_FIELDS = {"mac": "mac", "ip": "ip", "code": "access_code", "serial_no": 
 MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$")
 NOTIFY_USER_USAGE = ("Usage: /notify_user <printer> <user> [user ...] to add, "
                      "/notify_user <printer> remove <user> [user ...] to remove, or /notify_user <printer> to list")
+UPLOAD_USAGE = ("Usage: send a sliced .3mf with the caption /upload <printer> [force], or reply to one with that "
+                "command. Start it from the printer's screen once the bed is clear and the filament is loaded. "
+                "'force' uploads even while the printer is printing.")
+# States in which /upload refuses without 'force', so the SD card isn't written to mid-print
+BUSY_STATES = (GcodeState.RUNNING, GcodeState.PAUSE, GcodeState.PREPARE)
 PRINT_USAGE = ("Usage: send a sliced .3mf with the caption /print <printer> [plate] [ams|ext], "
                "or reply to one with that command. Filament N is printed from AMS tray N.")
 # Telegram bots can only download files up to 20 MB
@@ -123,6 +128,7 @@ class BotHandlers:
             "restartall": self.cmd_restartall,
             "home": self.cmd_home,
             "print": self.cmd_print,
+            "upload": self.cmd_upload,
             "staff": self.cmd_staff,
             "config": self.cmd_config,
             "printer": self.cmd_printer,
@@ -134,6 +140,8 @@ class BotHandlers:
         # Commands in a document's caption don't reach CommandHandler
         app.add_handler(MessageHandler(filters.Document.ALL & filters.CaptionRegex(r"^/print(@\w+)?(\s|$)"),
                                        self._unless_disabled("print", self.cmd_print_caption)))
+        app.add_handler(MessageHandler(filters.Document.ALL & filters.CaptionRegex(r"^/upload(@\w+)?(\s|$)"),
+                                       self._unless_disabled("upload", self.cmd_upload_caption)))
 
         callbacks = {
             _callback_pattern("claim", "claim"): self.cb_claim,
@@ -969,6 +977,90 @@ class BotHandlers:
         """Admin only (testing): print a 3MF sent with /print in its caption."""
         message = update.effective_message
         await self._print_document(update, context, message.caption.split()[1:], message.document)
+
+    async def cmd_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin only: copy a 3MF from a replied-to document to a printer, without starting it."""
+        reply_to = _replied_to(update.effective_message)
+        await self._upload_document(update, context, context.args, reply_to.document if reply_to else None)
+
+    async def cmd_upload_caption(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin only: copy a 3MF sent with /upload in its caption to a printer, without starting it."""
+        message = update.effective_message
+        await self._upload_document(update, context, message.caption.split()[1:], message.document)
+
+    async def _check_3mf(self, update: Update, document, printer_num: int) -> bool:
+        """Check a document can go to a printer before downloading it, replying if it can't."""
+        reply = update.effective_message.reply_text
+        if not (document.file_name or "").lower().endswith(".3mf"):
+            await reply("Only sliced .3mf files can be sent to a printer.")
+            return False
+        if document.file_size and document.file_size > MAX_PRINT_FILE_SIZE:
+            await reply("That file is too big. Telegram only lets bots download files up to 20 MB.")
+            return False
+        if printer_num not in self.pm:
+            await reply(f"Invalid printer number. Use {self.pm.numbers_text()}")
+            return False
+        if not self.pm.get_online_printer(printer_num):
+            await reply(f"Printer {printer_num} is not connected.")
+            return False
+        return True
+
+    async def _download(self, update: Update, context: ContextTypes.DEFAULT_TYPE, document) -> bytes | None:
+        """Download a document from Telegram, replying and returning None if that fails."""
+        try:
+            return bytes(await (await context.bot.get_file(document.file_id)).download_as_bytearray())
+        except Exception as e:
+            # e.g. a network error, or a file over 20 MB that didn't report its size
+            await update.effective_message.reply_text(f"Couldn't download {document.file_name}: {e}")
+            return None
+
+    async def _upload_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: list[str], document):
+        reply = update.effective_message.reply_text
+        if not await self._require_admin(update):
+            return
+        force = len(args) == 2 and args[1].lower() == "force"
+        if not document or not args or not args[0].isdigit() or len(args) > 2 or (len(args) == 2 and not force):
+            await reply(UPLOAD_USAGE)
+            return
+        printer_num = int(args[0])
+        if not await self._check_3mf(update, document, printer_num):
+            return
+        state = self.pm.get_online_printer(printer_num).get_state()
+        busy = state in BUSY_STATES
+        if busy and not force:
+            await reply(f"Printer {printer_num} is busy ({state.name}), not uploading. "
+                        f"To upload anyway, use /upload {printer_num} force.")
+            return
+        data = await self._download(update, context, document)
+        if data is None:
+            return
+        name = document.file_name
+        try:
+            plates = files.sliced_plates(data)
+        except ValueError as e:
+            await reply(f"Can't upload {name}: {e}.")
+            return
+        if not plates:
+            await reply(f"Can't upload {name}: it has no sliced plates. "
+                        "Export it with File > Export > Export plate sliced file.")
+            return
+
+        # Keep the name simple for the printer's FTP server and file browser, and timestamp
+        # it (ddmmyy-hhmmss) so an upload never replaces an earlier file with the same name
+        stem = re.sub(r"[^\w.-]", "_", name[:-len(".3mf")])
+        filename = f"{stem}-{time.strftime('%d%m%y-%H%M%S')}.3mf"
+        await reply(f"Uploading {name} to Printer {printer_num}...")
+        try:
+            await self.pm.upload(printer_num, filename, data)
+        except Exception as e:
+            await reply(f"Failed to upload {name} to Printer {printer_num}: {e}")
+            return
+        plate_list = ", ".join(map(str, plates))
+        forced = f" (forced while {state.name})" if busy else ""
+        await self.ms.log_message(f"{self.storage.display_name(update.effective_user.id)} uploaded {filename} "
+                                  f"to Printer {printer_num}{forced}.")
+        await reply(f"Uploaded {filename} to Printer {printer_num} (sliced plate{'s' if len(plates) > 1 else ''} "
+                    f"{plate_list}). Start it from the printer's screen once the bed is clear and the filament is loaded.")
 
     async def _print_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: list[str], document):
         reply = update.effective_message.reply_text
