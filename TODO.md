@@ -18,8 +18,8 @@ Last reviewed 2026-10-23. Items marked **(ask Max first)** need a design decisio
       so Max does this (`./stop.sh && ./start.sh` in the bot's checkout).
 - [ ] Add `disabled_commands` to prod's `config.yml`. It has none yet, so every command is enabled.
       Plan: `print: true` once `/upload` is live.
-- [ ] Merge or cherry-pick `feat/upload` (`c1a57f8`, one commit off `prod`) into `staging`, then
-      `prod`. Not pushed yet.
+- [ ] Merge `feat/upload` (`c1a57f8`, one commit off `prod`) into `prod`. It's already merged into
+      `staging` (`39132df`), and both branches are pushed.
 - [ ] Test `/upload <printer> force` on a real printer while it's printing. Check that writing to
       the SD card mid-print doesn't disturb the print. Without `force`, `/upload` refuses while
       RUNNING, PAUSE or PREPARE.
