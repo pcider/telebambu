@@ -25,7 +25,7 @@ HEADER = """\
 
 # Commands that config.yml can turn off one by one. A disabled /staff also leaves the owner
 # as the only role: admins and mods act as users until it is turned back on.
-DISABLEABLE_COMMANDS = ('print', 'speed', 'skip', 'staff', 'forcereclaim', 'restart', 'restartall', 'home')
+DISABLEABLE_COMMANDS = ('print', 'speed', 'skip', 'staff', 'forcereclaim', 'restart', 'restartall', 'home', 'beep')
 
 
 @dataclass
