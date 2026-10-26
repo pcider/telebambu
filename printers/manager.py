@@ -140,6 +140,7 @@ class FilamentTray:
     color: str
     remain: int  # percent left, or -1 when the printer can't tell (e.g. non-Bambu spools)
     active: bool = False
+    raw: dict = field(default_factory=dict, repr=False)  # the printer's report, for debugging
 
     def describe(self) -> str:
         text = f"{self.label}: {self.material or 'empty'}"
@@ -159,6 +160,7 @@ def _tray(tray_id: int, label: str, raw: dict, active_id: int) -> FilamentTray:
         color=f'#{color[:6]}' if len(color) >= 6 else '',
         remain=to_int(raw.get('remain'), -1),
         active=tray_id == active_id,
+        raw=raw,
     )
 
 

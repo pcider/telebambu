@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import TYPE_CHECKING
 
@@ -166,6 +167,11 @@ class PrinterMonitor:
         if not tray or not 0 <= tray.remain <= LOW_FILAMENT_PERCENT or tray.tray_id in session.low_filament_alerted:
             return
         self.storage.mark_low_filament_alerted(num, tray.tray_id)
+        if not self.settings.low_filament_alerts:
+            # Claimers got false alarms, so for now only log the match with the raw tray report to debug it
+            await self.ms.log_message(f"Low filament check matched on Printer {num} (alert not sent): "
+                                      f"{tray.describe()}, tray {tray.tray_id}, raw {json.dumps(tray.raw, default=str)}")
+            return
         await self.ms.send_filament_notification(num, f"Filament is running low ({tray.describe()}).")
 
     async def _check_periodic_camera(self, num: int):
