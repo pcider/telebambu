@@ -26,6 +26,8 @@ COMMANDS = (
     CommandDefinition("camera", "View printer camera"),
     CommandDefinition("light", "Toggle printer light"),
     CommandDefinition("staff", "See the owner, admins and mods"),
+    CommandDefinition("reportbug", "Report a bug to the maintainers"),
+    CommandDefinition("suggestfeature", "Suggest a feature to the maintainers"),
     CommandDefinition("forcereclaim", "Give a print to someone else", Role.ADMIN),
     CommandDefinition("forceunclaim", "Unclaim someone else's print", Role.ADMIN),
     CommandDefinition("restart", "Reboot printers", Role.ADMIN),

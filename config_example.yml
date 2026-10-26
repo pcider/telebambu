@@ -14,6 +14,8 @@ owner_id: 1234567890
 chat_id: '1234567890/1234'         # Main chat for print updates
 status_chat_id: '1234567890/1234'  # Chat for the live status message
 log_chat_id: '1234567890'          # Chat for logs, or null to disable
+feedback_chat_id: null            # Chat for /reportbug and /suggestfeature, or null to use the log chat
+feedback_thread_id: null          # Forum topic in feedback_chat_id (optional)
 
 update_interval: 3          # seconds between printer polls (owner can change with /config)
 stats_log_interval: 3600    # seconds between update timing/status reports, or null to disable
@@ -31,6 +33,8 @@ disabled_commands:
   restart: false
   restartall: false
   home: false
+  reportbug: false
+  suggestfeature: false
 
 # Printers by number. Admins can manage these with /printer.
 printers:

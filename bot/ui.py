@@ -24,7 +24,9 @@ USER_HELP = (
     "/skip <printer> <object> [object ...] - Stop printing those objects\n"
     "/camera [printer] - View camera image from your printer\n"
     "/light [printer] - Toggle your printer's light\n"
-    "/staff [list [user]] - See who the owner, admins and mods are\n\n"
+    "/staff [list [user]] - See who the owner, admins and mods are\n"
+    "/reportbug <text> - Report a bug to the maintainers (or reply to a message)\n"
+    "/suggestfeature <text> - Suggest a feature to the maintainers (or reply to a message)\n\n"
     "Note: [printer] is required when you have multiple prints claimed. "
     "Users can be given as @username, user id, or by replying to their message."
 )
@@ -50,7 +52,7 @@ OWNER_HELP = (
     "/staff edit <admin|mod|user> <user> - Add or remove admins and mods\n"
     "/staff edit owner <user> - Transfer ownership (you become an admin)\n"
     "/config - Show chat targets and update interval\n"
-    "/config set <chat_id|status_chat_id|log_chat_id|update_interval> <value> - Change them"
+    "/config set <chat_id|status_chat_id|log_chat_id|feedback_chat_id|feedback_thread_id|update_interval> <value> - Change them"
 )
 
 

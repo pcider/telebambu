@@ -22,9 +22,12 @@ from settings import DISABLEABLE_COMMANDS, PrinterConfig, Settings
 
 NOTIFY_USAGE = "Usage: /notify [printer] <layer> or /notify [printer] <percent>%"
 NOTIFY_EVERY_USAGE = "Usage: /notify_every [printer] layers <number>, time <minutes>, percent <number>, or off"
-CONFIG_USAGE = "Usage: /config or /config set <chat_id|status_chat_id|log_chat_id|update_interval> <value>"
+CONFIG_USAGE = ("Usage: /config or /config set "
+                "<chat_id|status_chat_id|log_chat_id|feedback_chat_id|feedback_thread_id|update_interval> <value>")
 # Settings the owner can change at runtime; chat targets are 'chat_id' or 'chat_id/thread_id'
-CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "update_interval")
+CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "feedback_chat_id", "feedback_thread_id", "update_interval")
+# Settings that 'none' or 'off' clears
+OPTIONAL_CONFIG_KEYS = ("log_chat_id", "feedback_chat_id", "feedback_thread_id")
 MIN_UPDATE_INTERVAL = 1  # seconds
 PRINTER_USAGE = (
     "Usage:\n"
@@ -45,6 +48,10 @@ MAX_PRINT_FILE_SIZE = 20 * 1024 * 1024
 # States in which a printer can start a new print
 READY_STATES = (GcodeState.IDLE, GcodeState.FINISH, GcodeState.FAILED)
 STAFF_USAGE = "Usage: /staff list [user] or /staff edit <owner|admin|mod|user> <user>"
+# /reportbug and /suggestfeature: command -> header of the message sent to the feedback chat
+FEEDBACK_HEADERS = {"reportbug": "🐞 Bug report", "suggestfeature": "💡 Feature suggestion"}
+MAX_FEEDBACK_LENGTH = 2000
+FEEDBACK_COOLDOWN = 60  # seconds between feedback messages from one user
 
 
 # Buttons sent before printers were 1-based, e.g. ``claim_0`` or ``dm_pref_0_chat``
@@ -96,6 +103,8 @@ class BotHandlers:
         self.ms = message_service
         self.pm = printer_manager
         self.settings = settings
+        # user id -> time.monotonic() of their last feedback message; in memory only
+        self._last_feedback: dict[int, float] = {}
 
     def register(self, app: Application):
         # Runs before every other handler so @usernames can be resolved later
@@ -124,6 +133,8 @@ class BotHandlers:
             "home": self.cmd_home,
             "print": self.cmd_print,
             "staff": self.cmd_staff,
+            "reportbug": self.cmd_reportbug,
+            "suggestfeature": self.cmd_suggestfeature,
             "config": self.cmd_config,
             "printer": self.cmd_printer,
         }
@@ -1126,8 +1137,13 @@ class BotHandlers:
                 await reply(f"update_interval must be a number of seconds, at least {MIN_UPDATE_INTERVAL}.")
                 return
             value = int(value) if value.is_integer() else value
-        elif key == "log_chat_id" and raw.lower() in ("none", "off"):
+        elif key in OPTIONAL_CONFIG_KEYS and raw.lower() in ("none", "off"):
             value = None
+        elif key == "feedback_thread_id":
+            if not raw.isdigit():
+                await reply("feedback_thread_id must be a forum topic id (a number), or 'none'.")
+                return
+            value = int(raw)
         else:
             try:
                 parse_chat_id(raw)
@@ -1249,6 +1265,62 @@ class BotHandlers:
         shown = "****" if field == "code" else value
         await self.ms.log_message(f"Printer change: {actor} set Printer {num} {field} to {shown}.")
         await reply(f"Printer {num} {field} set to {shown}." + (" Reconnecting..." if field != "mac" else ""))
+
+    # --- Feedback ---
+
+    async def cmd_reportbug(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._send_feedback(update, context, "reportbug")
+
+    async def cmd_suggestfeature(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._send_feedback(update, context, "suggestfeature")
+
+    def _feedback_target(self) -> tuple[str | None, int | None]:
+        """feedback_chat_id (with feedback_thread_id as its topic), or the log chat when unset."""
+        if not self.settings.feedback_chat_id:
+            return self.ms.ctx.log_chat_id, self.ms.ctx.log_thread_id
+        chat_id, thread_id = parse_chat_id(self.settings.feedback_chat_id)
+        return chat_id, self.settings.feedback_thread_id or thread_id
+
+    async def _send_feedback(self, update: Update, context: ContextTypes.DEFAULT_TYPE, command: str):
+        """Post a /reportbug or /suggestfeature message to the feedback chat."""
+        message = update.effective_message
+        reply = message.reply_text
+        # The text after the command, keeping its line breaks; otherwise the replied-to message's text
+        parts = (message.text or "").split(None, 1)
+        text = parts[1].strip() if len(parts) > 1 else ""
+        if not text:
+            reply_to = _replied_to(message)
+            text = ((reply_to.text or reply_to.caption or "") if reply_to else "").strip()
+        if not text:
+            await reply(f"Usage: /{command} <text>, or reply to a message with /{command}")
+            return
+        if len(text) > MAX_FEEDBACK_LENGTH:
+            await reply(f"That's too long ({len(text)} characters). Please keep it under {MAX_FEEDBACK_LENGTH}.")
+            return
+
+        chat_id, thread_id = self._feedback_target()
+        if not chat_id:
+            await reply("Feedback isn't set up on this bot.")
+            return
+
+        user = update.effective_user
+        now = time.monotonic()
+        last = self._last_feedback.get(user.id)
+        if last is not None and now - last < FEEDBACK_COOLDOWN:
+            await reply(f"Please wait {math.ceil(FEEDBACK_COOLDOWN - (now - last))} s before sending more feedback.")
+            return
+
+        chat = message.chat
+        source = "private chat" if chat.type == "private" else f"{chat.title or chat.id} ({chat.id})"
+        post = f"{FEEDBACK_HEADERS[command]}\nFrom: {_mention(user)} ({user.id})\nChat: {source}\n\n{text}"
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=post, message_thread_id=thread_id)
+        except Exception as e:
+            print(f"Failed to send /{command} feedback: {e}")
+            await reply("Sorry, your feedback couldn't be sent. Please try again later.")
+            return
+        self._last_feedback[user.id] = now
+        await reply("Thanks, sent to the maintainers.")
 
     # --- Callback buttons ---
 

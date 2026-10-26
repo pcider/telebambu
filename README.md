@@ -60,8 +60,13 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    Upgrading from `config.py`? Start the bot once without a `config.yml` and it will create one
    from your `config.py`, which can then be deleted.
 
-   The owner can change `chat_id`, `status_chat_id`, `log_chat_id` and `update_interval` at runtime
-   with `/config`. The bot rewrites `config.yml` when settings change, so hand-written comments
+   `/reportbug` and `/suggestfeature` post to `feedback_chat_id` (a chat target like the others),
+   in the forum topic `feedback_thread_id` if that is set. Without `feedback_chat_id` they go to the
+   log chat, and with neither set they reply that feedback isn't set up.
+
+   The owner can change `chat_id`, `status_chat_id`, `log_chat_id`, `feedback_chat_id`,
+   `feedback_thread_id` and `update_interval` at runtime with `/config` (`none` clears the optional
+   ones). The bot rewrites `config.yml` when settings change, so hand-written comments
    are not kept.
 
    `update_interval` must be at least 1 second, but has no upper limit. `/config set update_interval inf`
@@ -71,7 +76,7 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    `update_interval` in `config.yml` by hand, and start it again.
 
    `disabled_commands` turns individual commands off: set `print`, `speed`, `skip`, `staff`,
-   `forcereclaim`, `restart`, `restartall` or `home` to `true`. Disabled commands are hidden from
+   `forcereclaim`, `restart`, `restartall`, `home`, `reportbug` or `suggestfeature` to `true`. Disabled commands are hidden from
    `/help` and the command menu and reply that they are disabled. `staff: true` also leaves the
    owner as the only role: admins and mods are treated as ordinary users, but their roles stay in
    `data.json` and come back when `staff` is set to `false` again.
@@ -167,6 +172,7 @@ sudo systemctl start telebambu
 - `/camera [printer]` - Fresh camera snapshot; in your DM it has a Refresh button
 - `/light [printer]` - Toggle the printer light
 - `/staff [list [user]]` - See the owner, admins and mods, or one user's role
+- `/reportbug <text>` / `/suggestfeature <text>` - Send a bug report or feature suggestion to the maintainers (or reply to a message with the command to send its text); up to 2000 characters, one per minute
 
 **Admins** (the owner can do all of these too)
 - `/camera`, `/light`, `/stop_at`, `/pause`, `/resume`, `/speed` and `/skip` work on any printer
@@ -181,7 +187,7 @@ sudo systemctl start telebambu
 **Owner**
 - `/staff edit <admin|mod|user> <user>` - Add or remove admins and mods
 - `/staff edit owner <user>` - Transfer ownership (asks for confirmation; you become an admin)
-- `/config` / `/config set <key> <value>` - Change `chat_id`, `status_chat_id`, `log_chat_id` or `update_interval`
+- `/config` / `/config set <key> <value>` - Change `chat_id`, `status_chat_id`, `log_chat_id`, `feedback_chat_id`, `feedback_thread_id` or `update_interval`
 
 Role changes, force reclaims, restarts and printer/config changes are posted to the log chat.
 Mods have no extra permissions yet.
