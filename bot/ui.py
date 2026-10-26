@@ -5,6 +5,7 @@ from data import Role
 from data.storage import PrintSession, Storage
 
 USER_HELP = (
+    "Use commands in a DM with the bot. In groups they only work in the staff chats.\n\n"
     "Available commands:\n"
     "/help - Show this help message\n"
     "/info - Summary of your claimed and watched prints\n"
@@ -58,7 +59,10 @@ OWNER_HELP = (
     "/config - Show settings and disabled commands\n"
     "/config set <key> <value> - Change a setting\n"
     "/config here <chat_id|status_chat_id|log_chat_id> - Use the chat and topic you send it in\n"
-    "/config disable <command> / /config enable <command> - Turn a command off or on"
+    "/config disable <command> / /config enable <command> - Turn a command off or on\n"
+    "/config set dm_only_commands <true|false> - Only take commands in DMs and command chats\n"
+    "/config set command_chats <id,id,...|none> - Extra group chats where commands work\n"
+    "/config allowhere|denyhere - Add or remove the group you send it in"
 )
 
 # Shown under the user commands unless disabled_commands turns the button off
@@ -173,6 +177,10 @@ def queue_dm_keyboard(bot_username: str, printer_num: int) -> InlineKeyboardMark
     """Start-DM button that sets up the /queue reminder once the DM is open."""
     url = f"https://t.me/{bot_username}?start=queue-{printer_num}"
     return InlineKeyboardMarkup([[InlineKeyboardButton("Start DM with bot", url=url)]])
+
+
+def open_dm_keyboard(bot_username: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Open DM", url=f"https://t.me/{bot_username}?start=")]])
 
 
 def _unclaim_help_row(printer_num: int) -> list[InlineKeyboardButton]:

@@ -30,6 +30,13 @@ ruined_report_timeout: 10   # seconds to wait for the cause after "Report ruined
 info_reply_ttl: 60          # seconds before replies to /help, /info, /camera etc. in groups are deleted
                             # (with the command), or null to keep them. DM replies are never deleted.
 
+# Commands only work in DMs with the bot and in these group chats: the status chat, the log
+# chat (unless one of them is the main chat) and command_chats. Elsewhere, notably the main
+# chat, the bot deletes the command (if it may) and tells the sender to use the DM.
+# The owner can change these with /config set, or /config allowhere|denyhere in a group.
+dm_only_commands: true      # false to take commands in every chat again
+command_chats: []           # extra group chat ids, e.g. ['-1001234567890']
+
 # Set a command to true to turn it off (the owner can use /config disable|enable <command>).
 # ruined_report is the "Report ruined print" button.
 # A disabled /staff also leaves the owner as the

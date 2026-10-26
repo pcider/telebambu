@@ -77,6 +77,10 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
      sets that chat and topic without having to look up their ids.
    - `/config disable <command>` and `/config enable <command>` change `disabled_commands`.
 
+   - `dm_only_commands` (`true`/`false`) and `command_chats` (comma-separated chat ids, or `none`)
+     control where commands work (see [Telegram Commands](#telegram-commands));
+     `/config allowhere` / `/config denyhere`, sent in a group, add it to or remove it from `command_chats`.
+
    Every change is posted to the log chat.
 
    `/reportbug` and `/suggestfeature` post to `feedback_chat_id` (a chat target like the others),
@@ -186,6 +190,15 @@ sudo systemctl start telebambu
 
 ### Telegram Commands
 
+Commands are used in a DM with the bot. In group chats they only work in the staff chats: the
+status chat, the log chat (unless either is also the main chat) and any chats in `command_chats`.
+A command sent in another group, such as the main chat, isn't run: the bot deletes it (when it has
+delete rights) and DMs the sender to send it there instead. If it can't DM them yet, it posts a short
+note with an **Open DM** button that deletes itself after 10 seconds. These hints are sent at most once
+a minute per user, and commands addressed to other bots are left alone. The buttons in the main chat
+(Claim in DM and so on) keep working. The owner can turn this off with
+`/config set dm_only_commands false`.
+
 `[printer]` is optional when you have exactly one print claimed. Users can be given as `@username`
 (once the bot has seen them), a numeric user id, or by replying to one of their messages.
 `/help` only lists the commands your role can use.
@@ -227,6 +240,7 @@ sudo systemctl start telebambu
 - `/config` / `/config set <key> <value>` - Show or change settings (chats, topics, `feedback_chat_id`, `feedback_thread_id`, intervals, `latency_warn_seconds`, `ruined_report_timeout`, `info_reply_ttl`, `auto_restart_printers`, `low_filament_alerts`, `log_commands`)
 - `/config here <chat_id|status_chat_id|log_chat_id>` - Point that chat target at the chat and topic the command is sent in
 - `/config disable <command>` / `/config enable <command>` - Turn a command off or on
+- `/config allowhere` / `/config denyhere` - Sent in a group, adds it to or removes it from `command_chats` (works in any group, like `/config here`)
 
 Print starts, finishes, failures and cancels, claims and unclaims (with the user's Telegram id), role changes,
 force reclaims, restarts and printer/config changes are posted to the log chat.

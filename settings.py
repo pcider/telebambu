@@ -66,6 +66,9 @@ class Settings:
     ruined_report_timeout: float = 10
     # Seconds before group replies to informational commands (and the commands) are deleted; None keeps them
     info_reply_ttl: Optional[float] = 60
+    # Commands only work in DMs and in the status chat, log chat and command_chats (never implicitly the main chat)
+    dm_only_commands: bool = True
+    command_chats: list[str] = field(default_factory=list)
     # One flag per command in DISABLEABLE_COMMANDS; true turns that command off
     disabled_commands: dict[str, bool] = field(default_factory=lambda: dict.fromkeys(DISABLEABLE_COMMANDS, False))
     printers: dict[int, PrinterConfig] = field(default_factory=dict)
@@ -91,7 +94,7 @@ class Settings:
 # Settings that may be left out of config.yml (or config.py, in upper case) to use the default
 OPTIONAL_KEYS = ('update_interval', 'stats_log_interval', 'latency_warn_seconds', 'auto_restart_printers',
                  'low_filament_alerts', 'log_commands', 'ruined_report_timeout',
-                 'info_reply_ttl')
+                 'info_reply_ttl', 'dm_only_commands')
 
 
 def _chat(value) -> Optional[str]:
@@ -123,6 +126,7 @@ def _from_dict(data: dict, path: str) -> Settings:
         feedback_chat_id=_chat(data.get('feedback_chat_id')),
         feedback_thread_id=int(data['feedback_thread_id']) if data.get('feedback_thread_id') else None,
         disabled_commands=_disabled_commands(data),
+        command_chats=[str(chat) for chat in data.get('command_chats') or []],
         printers=printers,
         path=path,
         # Only keys that are set, so missing ones fall back to the Settings defaults
