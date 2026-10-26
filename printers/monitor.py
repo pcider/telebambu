@@ -213,10 +213,12 @@ class PrinterMonitor:
 
         elif event.type == EventType.PRINT_FINISHED:
             await self.ms.send_print_finished(num, await self.pm.get_camera_frame(num))
+            await self.ms.send_printer_free(num)
 
         elif event.type == EventType.PRINT_FAILED:
             frame = await self.pm.get_camera_frame(num)
             await self.ms.send_print_failed(num, event.data.get('error_code'), frame)
+            await self.ms.send_printer_free(num, failed=True)
 
         elif event.type == EventType.PRINT_PAUSED:
             frame = await self.pm.get_camera_frame(num)
@@ -271,6 +273,10 @@ class PrinterMonitor:
 
         else:
             await self.ms.log_message(f'{prefix}: {state}, nothing to catch up')
+
+        # /queue reminders for a print that ended while the bot was down
+        if state in (GcodeState.FINISH, GcodeState.IDLE, GcodeState.FAILED):
+            await self.ms.send_printer_free(num, failed=state == GcodeState.FAILED)
 
     async def _stop_print(self, num: int, layer: int):
         """Stop a print that reached its /stop_at layer."""

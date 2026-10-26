@@ -24,6 +24,9 @@ USER_HELP = (
     "/skip <printer> <object> [object ...] - Stop printing those objects\n"
     "/camera [printer] - View camera image from your printer\n"
     "/light [printer] - Toggle your printer's light\n"
+    "/queue <printer> - Get a DM when the printer's current print ends\n"
+    "/queue - List your /queue reminders\n"
+    "/unqueue <printer> - Cancel a /queue reminder\n"
     "/staff [list [user]] - See who the owner, admins and mods are\n\n"
     "Note: [printer] is required when you have multiple prints claimed. "
     "Users can be given as @username, user id, or by replying to their message."
@@ -129,6 +132,12 @@ def camera_keyboard(printer_num: int, unclaim: bool = False) -> InlineKeyboardMa
 
 def start_dm_keyboard(bot_username: str, printer_num: int) -> InlineKeyboardMarkup:
     url = f"https://t.me/{bot_username}?start=claim-{printer_num}"
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Start DM with bot", url=url)]])
+
+
+def queue_dm_keyboard(bot_username: str, printer_num: int) -> InlineKeyboardMarkup:
+    """Start-DM button that sets up the /queue reminder once the DM is open."""
+    url = f"https://t.me/{bot_username}?start=queue-{printer_num}"
     return InlineKeyboardMarkup([[InlineKeyboardButton("Start DM with bot", url=url)]])
 
 

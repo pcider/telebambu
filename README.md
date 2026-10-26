@@ -10,6 +10,7 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
 - Live camera access to view printers
 - Layer 2 progress notifications
 - Low filament (10% or less on the spool in use) and filament run-out alerts to a print's claimer and anyone added with `/notify_user`
+- `/queue` reminders: a DM when a busy printer becomes free
 - Persistent status message showing all printer states
 - Configurable notification preferences (chat or DM)
 
@@ -71,7 +72,7 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    `update_interval` in `config.yml` by hand, and start it again.
 
    `disabled_commands` turns individual commands off: set `print`, `speed`, `skip`, `staff`,
-   `forcereclaim`, `restart`, `restartall` or `home` to `true`. Disabled commands are hidden from
+   `forcereclaim`, `restart`, `restartall`, `home` or `queue` (also `/unqueue`) to `true`. Disabled commands are hidden from
    `/help` and the command menu and reply that they are disabled. `staff: true` also leaves the
    owner as the only role: admins and mods are treated as ordinary users, but their roles stay in
    `data.json` and come back when `staff` is set to `false` again.
@@ -166,6 +167,7 @@ sudo systemctl start telebambu
 - `/skip [printer]` - List the objects on the plate being printed; `/skip <printer> <object> [object ...]` stops printing those objects (read from the print's 3MF on the printer over FTP)
 - `/camera [printer]` - Fresh camera snapshot; in your DM it has a Refresh button
 - `/light [printer]` - Toggle the printer light
+- `/queue <printer>` - Get a one-time DM when the printer's current print ends (finished or failed); works on any printer, claimed or not, and doesn't reserve it. Everyone who asked is told at the same time. `/queue` alone lists your reminders, `/unqueue <printer>` cancels one (at most 10 per user, 20 per printer)
 - `/staff [list [user]]` - See the owner, admins and mods, or one user's role
 
 **Admins** (the owner can do all of these too)

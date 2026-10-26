@@ -25,7 +25,9 @@ HEADER = """\
 
 # Commands that config.yml can turn off one by one. A disabled /staff also leaves the owner
 # as the only role: admins and mods act as users until it is turned back on.
-DISABLEABLE_COMMANDS = ('print', 'speed', 'skip', 'staff', 'forcereclaim', 'restart', 'restartall', 'home')
+DISABLEABLE_COMMANDS = ('print', 'speed', 'skip', 'staff', 'forcereclaim', 'restart', 'restartall', 'home', 'queue')
+# Commands turned off by another command's flag
+LINKED_COMMANDS = {'unqueue': 'queue'}
 
 
 @dataclass
@@ -52,10 +54,10 @@ class Settings:
     path: str = field(default=CONFIG_FILE, repr=False, compare=False)
 
     def is_disabled(self, command: str) -> bool:
-        return bool(self.disabled_commands.get(command))
+        return bool(self.disabled_commands.get(LINKED_COMMANDS.get(command, command)))
 
     def disabled(self) -> frozenset[str]:
-        return frozenset(command for command in DISABLEABLE_COMMANDS if self.is_disabled(command))
+        return frozenset(command for command in (*DISABLEABLE_COMMANDS, *LINKED_COMMANDS) if self.is_disabled(command))
 
     def save(self):
         data = asdict(self)

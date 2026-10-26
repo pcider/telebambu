@@ -207,6 +207,16 @@ class MessageService:
 
         self._spawn(_delete_later())
 
+    async def send_printer_free(self, printer_num: int, failed: bool = False):
+        """DM everyone who asked with /queue that the printer is free, then forget them."""
+        text = f"Printer {printer_num} is free now (print {'failed' if failed else 'finished'})."
+        for user_id in self.storage.pop_free_reminders(printer_num):
+            try:
+                await self._send(user_id, text)
+            except Exception as e:
+                await self.log_message(f'Could not send Printer {printer_num} /queue reminder to '
+                                       f'{self.storage.display_name(user_id)}: {e}')
+
     # --- Claimer notifications (sent to the claimer's and watchers' DMs) ---
 
     async def _notify_watchers(self, session: PrintSession | None, message: str, image: bytes | None):
