@@ -17,7 +17,8 @@ HEADER = """\
 # through /config or /printer, so comments added here are not kept.
 #
 # Chat targets are 'chat_id' or 'chat_id/thread_id' for forum topics.
-# log_chat_id: null disables the log chat. stats_log_interval: null disables
+# log_chat_id: null disables the log chat. feedback_chat_id: null sends
+# /reportbug and /suggestfeature to the log chat. stats_log_interval: null disables
 # the periodic update timing report. latency_warn_seconds: null disables the
 # stale printer / slow update warnings. owner_id seeds the owner role on first
 # run; after that roles live in data.json and change through /staff.
@@ -26,7 +27,8 @@ HEADER = """\
 
 # Commands that config.yml can turn off one by one. A disabled /staff also leaves the owner
 # as the only role: admins and mods act as users until it is turned back on.
-DISABLEABLE_COMMANDS = ('print', 'speed', 'skip', 'staff', 'forcereclaim', 'restart', 'restartall', 'home', 'beep')
+DISABLEABLE_COMMANDS = ('print', 'speed', 'skip', 'staff', 'forcereclaim', 'restart', 'restartall', 'home',
+                        'beep', 'reportbug', 'suggestfeature')
 
 
 @dataclass
@@ -44,6 +46,10 @@ class Settings:
     status_chat_id: str
     owner_id: Optional[int] = None
     log_chat_id: Optional[str] = None
+    # Where /reportbug and /suggestfeature go; null falls back to the log chat
+    feedback_chat_id: Optional[str] = None
+    # Forum topic for feedback, overriding a thread given in feedback_chat_id
+    feedback_thread_id: Optional[int] = None
     update_interval: float = 5
     stats_log_interval: Optional[float] = 60 * 60
     latency_warn_seconds: Optional[float] = 10
@@ -105,6 +111,8 @@ def _from_dict(data: dict, path: str) -> Settings:
         status_chat_id=_chat(data['status_chat_id']),
         owner_id=int(owner_id) if owner_id else None,
         log_chat_id=_chat(data.get('log_chat_id')),
+        feedback_chat_id=_chat(data.get('feedback_chat_id')),
+        feedback_thread_id=int(data['feedback_thread_id']) if data.get('feedback_thread_id') else None,
         disabled_commands=_disabled_commands(data),
         printers=printers,
         path=path,

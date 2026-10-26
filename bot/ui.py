@@ -24,7 +24,9 @@ USER_HELP = (
     "/skip <printer> <object> [object ...] - Stop printing those objects\n"
     "/camera [printer] - View camera image from your printer\n"
     "/light [printer] - Toggle your printer's light\n"
-    "/staff [list [user]] - See who the owner, admins and mods are\n\n"
+    "/staff [list [user]] - See who the owner, admins and mods are\n"
+    "/reportbug <text> - Report a bug to the maintainers (or reply to a message)\n"
+    "/suggestfeature <text> - Suggest a feature to the maintainers (or reply to a message)\n\n"
     "Note: [printer] is required when you have multiple prints claimed. "
     "Users can be given as @username, user id, or by replying to their message."
 )
