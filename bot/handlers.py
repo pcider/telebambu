@@ -88,13 +88,17 @@ def _parse_latency_warn_seconds(raw: str) -> float | None:
     return _seconds(value)
 
 
-def _parse_bool(raw: str) -> bool:
+def _parse_bool(raw: str, key: str) -> bool:
     value = raw.lower()
     if value in ("true", "on", "yes", "1"):
         return True
     if value in ("false", "off", "no", "0"):
         return False
-    raise ValueError(f"'{raw}' is not true or false.")
+    raise ValueError(f"{key} must be true or false.")
+
+
+def _bool(key: str) -> Callable[[str], bool]:
+    return partial(_parse_bool, key=key)
 
 
 @dataclass(frozen=True)
@@ -117,8 +121,9 @@ CONFIG_KEYS = {
     "update_interval": ConfigKey(_parse_update_interval),
     "stats_log_interval": ConfigKey(_parse_stats_log_interval),
     "latency_warn_seconds": ConfigKey(_parse_latency_warn_seconds),
-    "auto_restart_printers": ConfigKey(_parse_bool),
-    "low_filament_alerts": ConfigKey(_parse_bool),
+    "auto_restart_printers": ConfigKey(_bool("auto_restart_printers")),
+    "low_filament_alerts": ConfigKey(_bool("low_filament_alerts")),
+    "log_commands": ConfigKey(_bool("log_commands")),
 }
 # Keys /config here sets to the chat and topic it's sent in
 CHAT_TARGET_KEYS = ("chat_id", "status_chat_id", "log_chat_id")
@@ -188,6 +193,18 @@ def _mention(user) -> str:
     return f"@{user.username}" if user.username else user.full_name
 
 
+def _logged_command(text: str) -> str:
+    """A command as written to the log chat, without secrets: /printer arguments can hold
+    access codes and serial numbers, so only its subcommand is kept."""
+    command, _, rest = text.partition(" ")
+    if command.split("@", 1)[0].lower() != "/printer":
+        return text
+    args = rest.replace(",", " ").split()
+    if not args:
+        return command
+    return f"{command} {args[0]}" + (" [redacted]" if len(args) > 1 else "")
+
+
 def _replied_to(message):
     """The message this one deliberately replies to, if any.
 
@@ -215,6 +232,8 @@ class BotHandlers:
     def register(self, app: Application):
         # Runs before every other handler so @usernames can be resolved later
         app.add_handler(TypeHandler(Update, self.track_user), group=-1)
+        # Its own group, as only the first matching handler in a group runs
+        app.add_handler(TypeHandler(Update, self.log_command), group=-2)
 
         commands = {
             "start": self.cmd_start,
@@ -276,6 +295,47 @@ class BotHandlers:
         user = update.effective_user
         if user and not user.is_bot:
             self.storage.remember_user(user.id, user.username, user.full_name)
+
+    async def log_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Post commands and button presses to the log chat when log_commands is on.
+
+        Runs before the command itself, so commands that are then refused are logged too.
+        """
+        if not self.settings.log_commands:
+            return
+        try:
+            await self._log_command(update, context)
+        except Exception as e:
+            print(f"Failed to log command: {e}")
+
+    async def _log_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if update.callback_query:
+            kind, text, message = "Button", update.callback_query.data, update.callback_query.message
+        else:
+            message = update.message or update.edited_message
+            text = message and (message.text or message.caption)
+            if not text or not text.startswith("/"):
+                return
+            # Commands meant for another bot in the group
+            target = text.split(maxsplit=1)[0].partition("@")[2]
+            if target and target.lower() != (context.bot.username or "").lower():
+                return
+            kind, text = "Command", _logged_command(text)
+        if user is None or text is None:
+            return
+
+        chat = update.effective_chat
+        if chat is None:
+            where = "unknown chat"
+        elif chat.type == "private":
+            where = "DM"
+        else:
+            where = f"{chat.title} ({chat.id}"
+            if message is not None and getattr(message, "is_topic_message", False):
+                where += f", thread {message.message_thread_id}"
+            where += ")"
+        await self.ms.log_message(f"{kind}: {_mention(user)} ({user.id}) in {where}: {text}")
 
     def is_admin(self, user_id: int) -> bool:
         return self.storage.get_role(user_id) >= Role.ADMIN

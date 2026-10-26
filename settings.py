@@ -50,6 +50,8 @@ class Settings:
     auto_restart_printers: bool = True
     # Off while the low-filament check gives false alarms: matches are only logged for debugging
     low_filament_alerts: bool = False
+    # Post every command and button press to the log chat
+    log_commands: bool = False
     # One flag per command in DISABLEABLE_COMMANDS; true turns that command off
     disabled_commands: dict[str, bool] = field(default_factory=lambda: dict.fromkeys(DISABLEABLE_COMMANDS, False))
     printers: dict[int, PrinterConfig] = field(default_factory=dict)
@@ -74,7 +76,7 @@ class Settings:
 
 # Settings that may be left out of config.yml (or config.py, in upper case) to use the default
 OPTIONAL_KEYS = ('update_interval', 'stats_log_interval', 'latency_warn_seconds', 'auto_restart_printers',
-                 'low_filament_alerts')
+                 'low_filament_alerts', 'log_commands')
 
 
 def _chat(value) -> Optional[str]:

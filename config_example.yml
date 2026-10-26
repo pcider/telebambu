@@ -23,6 +23,7 @@ stats_log_interval: 3600    # seconds between update timing/status reports, or n
 latency_warn_seconds: 10    # log when a printer sends no update (or a poll takes) this long, or null to disable
 auto_restart_printers: true # false to only log idle printers with no camera instead of rebooting them
 low_filament_alerts: false  # true to warn claimers of low filament; false only logs what would have been sent
+log_commands: false         # true to post every command and button press to the log chat (owner can change with /config)
 
 # Set a command to true to turn it off (the owner can use /config disable|enable <command>).
 # A disabled /staff also leaves the owner as the
