@@ -119,7 +119,8 @@ class MessageService:
         draft = PrintSession(message_id=0, chat_id=self.ctx.chat_id, printer_num=printer_num,
                              print_time=print_time, total_layers=total_layers, file_name=file_name,
                              catchup=catchup)
-        msg = await self._send_main(ui.started_text(printer_num, draft), reply_markup=ui.claim_keyboard(printer_num))
+        msg = await self._send_main(ui.started_text(printer_num, draft),
+                                    reply_markup=ui.claim_keyboard(self.bot.username, printer_num))
 
         subtask, gcode_file = names
         self.storage.start_print(printer_num, msg.message_id, self.ctx.chat_id, print_time, total_layers, file_name,
