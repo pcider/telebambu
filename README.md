@@ -180,7 +180,7 @@ sudo systemctl start telebambu
 - `/help` - List the commands you can use
 - `/info` - Summary of all your claimed and watched prints, in the status message style
 - `/info <printer>` - Progress, time remaining, layer, file name, temperatures, speed, loaded filament (AMS slots and external spool, with % left) and pending notifications for a print
-- `/claim <printer>` - Claim an unclaimed print without its button
+- `/claim <printer>` - Claim an unclaimed print (send it in your DM with the bot)
 - `/unclaim [printer]` - Release your claim on a print
 - `/notify [printer] <layer>` or `/notify [printer] <percent>%` - One-time notification with a camera snapshot at a milestone
 - `/notify_every [printer] layers|time|percent <number>` - Recurring camera snapshots during a print (`off` to disable)
@@ -218,7 +218,9 @@ Mods have no extra permissions yet.
 
 ### Interactive Buttons
 
-When a print starts, the bot sends a message with a **Claim Print** button. Claiming a print allows you to:
+When a print starts, the bot sends a message with a **Claim in DM** button. It opens your DM with the bot,
+which tells you to send `/claim <printer>` there; claiming in the DM makes sure the bot can message you.
+(Old **Claim Print** buttons open the DM the same way.) Claiming a print allows you to:
 - Receive the finish notification directly
 - Choose between chat or DM delivery
 - Enable/disable Layer 2 progress notifications

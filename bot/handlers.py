@@ -1,4 +1,5 @@
 import asyncio
+import html
 import ipaddress
 import math
 import re
@@ -497,7 +498,7 @@ class BotHandlers:
                 chat_id=session.chat_id,
                 message_id=session.message_id,
                 text=ui.started_text(printer_num, session),
-                reply_markup=ui.claim_keyboard(printer_num),
+                reply_markup=ui.claim_keyboard(context.bot.username, printer_num),
             )
             return f"You have unclaimed Printer {printer_num}."
         except Exception:
@@ -513,7 +514,7 @@ class BotHandlers:
     # --- Commands ---
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handles deep links from the "Start DM with bot" button."""
+        """Handles deep links from the "Claim in DM" and "Start DM with bot" buttons."""
         user = update.effective_user
         reply = update.effective_message.reply_text
         arg = context.args[0] if context.args else ""
@@ -522,7 +523,7 @@ class BotHandlers:
 
         match = re.fullmatch(r"claim([-_])(\d+)", arg)
         if not match:
-            await reply("Welcome! Use the buttons in the main chat to claim prints.")
+            await reply("Welcome! Use the Claim in DM buttons in the main chat, or /claim <printer>, to claim prints.")
             return
 
         # "claim_N" links predate 1-based printer numbers
@@ -530,6 +531,12 @@ class BotHandlers:
         session = self.storage.get_print(printer_num)
         if not session:
             await reply(ui.SESSION_ENDED)
+            return
+        if not session.claimed_by:
+            # Claiming is an explicit step in the DM, not a side effect of opening it
+            status = html.escape(self._print_status(printer_num))
+            await reply(f"Send <code>/claim {printer_num}</code> to claim Printer {printer_num}.{status}",
+                        parse_mode=ParseMode.HTML)
             return
         if session.claimed_by != user.id:
             await reply("You are not the claimer of this print.")
@@ -997,7 +1004,7 @@ class BotHandlers:
             await reply(f"Failed to toggle light: {e}")
 
     async def cmd_claim(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Claim an unclaimed print without its button, e.g. when the start message is buried."""
+        """Claim an unclaimed print, usually in the DM opened by the "Claim in DM" button."""
         reply = update.effective_message.reply_text
         args = context.args
         if len(args) != 1 or not args[0].isdigit():
@@ -1579,20 +1586,10 @@ class BotHandlers:
     # --- Callback buttons ---
 
     async def cb_claim(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Legacy "Claim Print" buttons on old messages: open the DM instead of claiming from the group."""
         query = update.callback_query
-        user = query.from_user
         printer_num, _ = _parse_callback(query)
-
-        session = self.storage.get_print(printer_num)
-        if not session:
-            await query.answer()
-            await query.edit_message_text(ui.SESSION_ENDED)
-            return
-        if session.claimed_by:
-            await query.answer(f"Already claimed by {session.claimed_username}", show_alert=True)
-            return
-        await query.answer()
-        await self._claim(context, user.id, _mention(user), printer_num)
+        await query.answer(url=ui.claim_link(context.bot.username, printer_num))
 
     async def _claimer_session(self, query: CallbackQuery, printer_num: int):
         """Return the session if the button presser is its claimer, otherwise answer the query and return None."""

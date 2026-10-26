@@ -66,7 +66,7 @@ class DisabledCommands(unittest.IsolatedAsyncioTestCase):
         reply = AsyncMock()
         update = SimpleNamespace(effective_user=SimpleNamespace(id=1), effective_message=SimpleNamespace(reply_text=reply))
         context = SimpleNamespace(args=['3'],
-                                  bot=SimpleNamespace(edit_message_text=AsyncMock(), send_message=AsyncMock()))
+                                  bot=SimpleNamespace(username='bot', edit_message_text=AsyncMock(), send_message=AsyncMock()))
         await handlers.cmd_forceunclaim(update, context)
         storage.unclaim_print.assert_called_once_with(3)
         handlers._claim.assert_not_awaited()

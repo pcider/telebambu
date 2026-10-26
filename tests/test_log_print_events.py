@@ -2,7 +2,7 @@
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 from bot.handlers import BotHandlers
 from bot.messages import MessageService
@@ -21,7 +21,7 @@ class PrintEventLogs(unittest.IsolatedAsyncioTestCase):
         self.storage = Mock(owner_id=99)
         self.storage.get_print.return_value = self.session
         self.context = BotContext('-100123', 5, '-100123', 6, '-100999', None)
-        self.bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=11, chat_id=1)),
+        self.bot = SimpleNamespace(username='bambubot', send_message=AsyncMock(return_value=SimpleNamespace(message_id=11, chat_id=1)),
                                    send_photo=AsyncMock(), delete_message=AsyncMock())
         self.ms = MessageService(self.bot, self.context, self.storage)
         self.ms.log_message = AsyncMock()
@@ -76,12 +76,14 @@ class ClaimEventLogs(unittest.IsolatedAsyncioTestCase):
         self.context = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock(), edit_message_text=AsyncMock(),
                                                            username='bambubot'))
 
-    async def test_claim_button_logs_user_and_id(self):
+    async def test_claim_logs_user_and_id(self):
+        # Claiming is /claim in the DM (the Claim in DM button only opens the DM)
         self.storage.get_print.return_value = self.unclaimed
         self.storage.claim_print.return_value = self.claimed
-        query = SimpleNamespace(data='claim:3', from_user=SimpleNamespace(id=42, username='claimer'),
-                                answer=AsyncMock())
-        await self.handlers.cb_claim(SimpleNamespace(callback_query=query), self.context)
+        self.handlers.pm = MagicMock(__contains__=Mock(return_value=True))
+        update = SimpleNamespace(effective_user=SimpleNamespace(id=42, username='claimer'),
+                                 effective_message=SimpleNamespace(reply_text=AsyncMock()))
+        await self.handlers.cmd_claim(update, SimpleNamespace(args=['3'], bot=self.context.bot))
         self.ms.log_event.assert_awaited_once_with('Claim: @claimer (42) claimed Printer 3.')
 
     async def test_unclaim_logs_the_previous_claimer(self):

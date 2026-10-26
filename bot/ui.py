@@ -111,8 +111,14 @@ def claimed_text(printer_num: int, session: PrintSession) -> str:
     return f"{tag}Printer {printer_num} started by {session.claimed_username}{_print_details(session)}"
 
 
-def claim_keyboard(printer_num: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Claim Print", callback_data=f"claim:{printer_num}")]])
+def claim_link(bot_username: str, printer_num: int) -> str:
+    """Deep link that opens the bot's DM with /start claim-N."""
+    return f"https://t.me/{bot_username}?start=claim-{printer_num}"
+
+
+def claim_keyboard(bot_username: str, printer_num: int) -> InlineKeyboardMarkup:
+    """Claiming happens in the DM, so the claimer has started the bot and can get notifications."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Claim in DM", url=claim_link(bot_username, printer_num))]])
 
 
 def unclaim_keyboard(printer_num: int) -> InlineKeyboardMarkup:
@@ -132,8 +138,7 @@ def camera_keyboard(printer_num: int, unclaim: bool = False) -> InlineKeyboardMa
 
 
 def start_dm_keyboard(bot_username: str, printer_num: int) -> InlineKeyboardMarkup:
-    url = f"https://t.me/{bot_username}?start=claim-{printer_num}"
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Start DM with bot", url=url)]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Start DM with bot", url=claim_link(bot_username, printer_num))]])
 
 
 def _unclaim_help_row(printer_num: int) -> list[InlineKeyboardButton]:
