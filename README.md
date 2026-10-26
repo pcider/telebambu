@@ -9,7 +9,7 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
 - Users can "claim" print jobs and receive personalized updates
 - Live camera access to view printers
 - Layer 2 progress notifications
-- Low filament (10% or less on the spool in use) and filament run-out alerts to a print's claimer and anyone added with `/notify_user`
+- Filament run-out alerts to a print's claimer and anyone added with `/notify_user`. Low filament alerts (10% or less on the spool in use) are off by default (`low_filament_alerts: false`) because they gave false alarms; while off, each match is only logged to the log chat with the printer's raw tray report so it can be debugged. The owner turns them back on with `/config set low_filament_alerts true`
 - Persistent status message showing all printer states
 - Configurable notification preferences (chat or DM)
 
@@ -60,7 +60,7 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    Upgrading from `config.py`? Start the bot once without a `config.yml` and it will create one
    from your `config.py`, which can then be deleted.
 
-   The owner can change `chat_id`, `status_chat_id`, `log_chat_id` and `update_interval` at runtime
+   The owner can change `chat_id`, `status_chat_id`, `log_chat_id`, `update_interval` and `low_filament_alerts` at runtime
    with `/config`. The bot rewrites `config.yml` when settings change, so hand-written comments
    are not kept.
 
@@ -181,7 +181,7 @@ sudo systemctl start telebambu
 **Owner**
 - `/staff edit <admin|mod|user> <user>` - Add or remove admins and mods
 - `/staff edit owner <user>` - Transfer ownership (asks for confirmation; you become an admin)
-- `/config` / `/config set <key> <value>` - Change `chat_id`, `status_chat_id`, `log_chat_id` or `update_interval`
+- `/config` / `/config set <key> <value>` - Change `chat_id`, `status_chat_id`, `log_chat_id`, `update_interval` or `low_filament_alerts`
 
 Role changes, force reclaims, restarts and printer/config changes are posted to the log chat.
 Mods have no extra permissions yet.

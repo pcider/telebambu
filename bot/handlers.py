@@ -22,9 +22,10 @@ from settings import DISABLEABLE_COMMANDS, PrinterConfig, Settings
 
 NOTIFY_USAGE = "Usage: /notify [printer] <layer> or /notify [printer] <percent>%"
 NOTIFY_EVERY_USAGE = "Usage: /notify_every [printer] layers <number>, time <minutes>, percent <number>, or off"
-CONFIG_USAGE = "Usage: /config or /config set <chat_id|status_chat_id|log_chat_id|update_interval> <value>"
+CONFIG_USAGE = ("Usage: /config or /config set "
+                "<chat_id|status_chat_id|log_chat_id|update_interval|low_filament_alerts> <value>")
 # Settings the owner can change at runtime; chat targets are 'chat_id' or 'chat_id/thread_id'
-CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "update_interval")
+CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "update_interval", "low_filament_alerts")
 MIN_UPDATE_INTERVAL = 1  # seconds
 PRINTER_USAGE = (
     "Usage:\n"
@@ -1128,6 +1129,11 @@ class BotHandlers:
             value = int(value) if value.is_integer() else value
         elif key == "log_chat_id" and raw.lower() in ("none", "off"):
             value = None
+        elif key == "low_filament_alerts":
+            if raw.lower() not in ("true", "false", "on", "off"):
+                await reply("low_filament_alerts must be true or false.")
+                return
+            value = raw.lower() in ("true", "on")
         else:
             try:
                 parse_chat_id(raw)

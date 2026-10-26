@@ -50,7 +50,7 @@ OWNER_HELP = (
     "/staff edit <admin|mod|user> <user> - Add or remove admins and mods\n"
     "/staff edit owner <user> - Transfer ownership (you become an admin)\n"
     "/config - Show chat targets and update interval\n"
-    "/config set <chat_id|status_chat_id|log_chat_id|update_interval> <value> - Change them"
+    "/config set <chat_id|status_chat_id|log_chat_id|update_interval|low_filament_alerts> <value> - Change them"
 )
 
 
