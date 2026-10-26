@@ -60,7 +60,8 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    Upgrading from `config.py`? Start the bot once without a `config.yml` and it will create one
    from your `config.py`, which can then be deleted.
 
-   The owner can change `chat_id`, `status_chat_id`, `log_chat_id` and `update_interval` at runtime
+   The owner can change `chat_id`, `status_chat_id`, `log_chat_id`, `update_interval`,
+   `dm_only_commands` and `command_chats` (see [Telegram Commands](#telegram-commands)) at runtime
    with `/config`. The bot rewrites `config.yml` when settings change, so hand-written comments
    are not kept.
 
@@ -147,6 +148,15 @@ sudo systemctl start telebambu
 
 ### Telegram Commands
 
+Commands are used in a DM with the bot. In group chats they only work in the staff chats: the
+status chat, the log chat (unless either is also the main chat) and any chats in `command_chats`.
+A command sent in another group, such as the main chat, isn't run: the bot deletes it (when it has
+delete rights) and DMs the sender to send it there instead. If it can't DM them yet, it posts a short
+note with an **Open DM** button that deletes itself after 10 seconds. These hints are sent at most once
+a minute per user, and commands addressed to other bots are left alone. The buttons in the main chat
+(Claim Print and so on) keep working. The owner can turn this off with
+`/config set dm_only_commands false`.
+
 `[printer]` is optional when you have exactly one print claimed. Users can be given as `@username`
 (once the bot has seen them), a numeric user id, or by replying to one of their messages.
 `/help` only lists the commands your role can use.
@@ -181,7 +191,8 @@ sudo systemctl start telebambu
 **Owner**
 - `/staff edit <admin|mod|user> <user>` - Add or remove admins and mods
 - `/staff edit owner <user>` - Transfer ownership (asks for confirmation; you become an admin)
-- `/config` / `/config set <key> <value>` - Change `chat_id`, `status_chat_id`, `log_chat_id` or `update_interval`
+- `/config` / `/config set <key> <value>` - Change `chat_id`, `status_chat_id`, `log_chat_id` `update_interval`, `dm_only_commands` or `command_chats` (comma-separated chat ids, or `none`)
+- `/config allowhere` / `/config denyhere` - Sent in a group, adds it to or removes it from `command_chats` (works in any group)
 
 Role changes, force reclaims, restarts and printer/config changes are posted to the log chat.
 Mods have no extra permissions yet.

@@ -46,6 +46,9 @@ class Settings:
     update_interval: float = 5
     stats_log_interval: Optional[float] = 60 * 60
     auto_restart_printers: bool = True
+    # Commands only work in DMs and in the status chat, log chat and command_chats (never implicitly the main chat)
+    dm_only_commands: bool = True
+    command_chats: list[str] = field(default_factory=list)
     # One flag per command in DISABLEABLE_COMMANDS; true turns that command off
     disabled_commands: dict[str, bool] = field(default_factory=lambda: dict.fromkeys(DISABLEABLE_COMMANDS, False))
     printers: dict[int, PrinterConfig] = field(default_factory=dict)
@@ -69,7 +72,7 @@ class Settings:
 
 
 # Settings that may be left out of config.yml (or config.py, in upper case) to use the default
-OPTIONAL_KEYS = ('update_interval', 'stats_log_interval', 'auto_restart_printers')
+OPTIONAL_KEYS = ('update_interval', 'stats_log_interval', 'auto_restart_printers', 'dm_only_commands')
 
 
 def _chat(value) -> Optional[str]:
@@ -99,6 +102,7 @@ def _from_dict(data: dict, path: str) -> Settings:
         owner_id=int(owner_id) if owner_id else None,
         log_chat_id=_chat(data.get('log_chat_id')),
         disabled_commands=_disabled_commands(data),
+        command_chats=[str(chat) for chat in data.get('command_chats') or []],
         printers=printers,
         path=path,
         # Only keys that are set, so missing ones fall back to the Settings defaults

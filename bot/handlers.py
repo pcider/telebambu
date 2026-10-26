@@ -8,8 +8,8 @@ from functools import partial
 
 from telegram import Update, CallbackQuery, InputFile, InputMediaPhoto, MessageEntity
 from telegram.constants import ParseMode
-from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
-                          TypeHandler, filters)
+from telegram.ext import (Application, ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, ContextTypes,
+                          MessageHandler, TypeHandler, filters)
 from bambulabs_api import GcodeState
 
 from data import Role, Storage, can_assign
@@ -22,9 +22,10 @@ from settings import DISABLEABLE_COMMANDS, PrinterConfig, Settings
 
 NOTIFY_USAGE = "Usage: /notify [printer] <layer> or /notify [printer] <percent>%"
 NOTIFY_EVERY_USAGE = "Usage: /notify_every [printer] layers <number>, time <minutes>, percent <number>, or off"
-CONFIG_USAGE = "Usage: /config or /config set <chat_id|status_chat_id|log_chat_id|update_interval> <value>"
+CONFIG_USAGE = ("Usage: /config, /config set <chat_id|status_chat_id|log_chat_id|update_interval|"
+                "dm_only_commands|command_chats> <value>, or /config allowhere|denyhere in a group")
 # Settings the owner can change at runtime; chat targets are 'chat_id' or 'chat_id/thread_id'
-CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "update_interval")
+CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "update_interval", "dm_only_commands", "command_chats")
 MIN_UPDATE_INTERVAL = 1  # seconds
 PRINTER_USAGE = (
     "Usage:\n"
@@ -45,6 +46,11 @@ MAX_PRINT_FILE_SIZE = 20 * 1024 * 1024
 # States in which a printer can start a new print
 READY_STATES = (GcodeState.IDLE, GcodeState.FINISH, GcodeState.FAILED)
 STAFF_USAGE = "Usage: /staff list [user] or /staff edit <owner|admin|mod|user> <user>"
+# A command at the start of a message or caption: /name or /name@bot
+_COMMAND_RE = re.compile(r"^/(\w+)(?:@(\w+))?(?:\s|$)")
+# Seconds between "use the DM" hints to the same user, and before the group fallback is deleted
+COMMAND_HINT_COOLDOWN = 60
+COMMAND_HINT_TTL = 10
 
 
 # Buttons sent before printers were 1-based, e.g. ``claim_0`` or ``dm_pref_0_chat``
@@ -96,10 +102,17 @@ class BotHandlers:
         self.ms = message_service
         self.pm = printer_manager
         self.settings = settings
+        # When each user was last told to use the DM, for COMMAND_HINT_COOLDOWN
+        self._command_hints: dict[int, float] = {}
+        # Filled by register(); only these commands are stopped outside command chats
+        self._command_names: frozenset[str] = frozenset()
 
     def register(self, app: Application):
         # Runs before every other handler so @usernames can be resolved later
         app.add_handler(TypeHandler(Update, self.track_user), group=-1)
+        # Runs before that: commands outside DMs and command chats stop here
+        app.add_handler(MessageHandler(filters.UpdateType.MESSAGES & (filters.TEXT | filters.CAPTION),
+                                       self.gate_commands), group=-2)
 
         commands = {
             "start": self.cmd_start,
@@ -127,6 +140,7 @@ class BotHandlers:
             "config": self.cmd_config,
             "printer": self.cmd_printer,
         }
+        self._command_names = frozenset(commands)
         for name, callback in commands.items():
             if name in DISABLEABLE_COMMANDS:
                 callback = self._unless_disabled(name, callback)
@@ -154,6 +168,75 @@ class BotHandlers:
                 return
             await callback(update, context)
         return guarded
+
+    # --- Where commands work ---
+
+    def _command_chat_ids(self) -> set[str]:
+        """Group chats commands work in: the status and log chats, unless one is also the main
+        chat (which is only allowed through command_chats), plus command_chats."""
+        main_chat, _ = parse_chat_id(self.settings.chat_id)
+        implicit = {parse_chat_id(self.settings.status_chat_id)[0], parse_chat_id(self.settings.log_chat_id)[0]}
+        return (implicit - {main_chat, None}) | set(self.settings.command_chats)
+
+    async def gate_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Stop commands sent in groups that aren't command chats, and point the sender to the DM."""
+        message = update.effective_message
+        user = update.effective_user
+        match = _COMMAND_RE.match(message.text or message.caption or "")
+        if not match or not user or not self.settings.dm_only_commands or message.chat.type == "private":
+            return
+        command, addressee = match[1].lower(), match[2]
+        if command not in self._command_names:
+            return
+        # Commands for other bots aren't ours to stop
+        if addressee and addressee.lower() != (context.bot.username or "").lower():
+            return
+        if str(message.chat.id) in self._command_chat_ids():
+            return
+        # So the owner can whitelist a group from inside it
+        args = (message.text or "").split()[1:2]
+        if (command == "config" and [arg.lower() for arg in args] in (["allowhere"], ["denyhere"])
+                and self.storage.get_role(user.id) == Role.OWNER):
+            return
+
+        await self.track_user(update, context)
+        try:
+            await message.delete()
+        except Exception:
+            pass  # No delete rights
+        now = time.monotonic()
+        if now - self._command_hints.get(user.id, -COMMAND_HINT_COOLDOWN) >= COMMAND_HINT_COOLDOWN:
+            self._command_hints[user.id] = now
+            await self._send_command_hint(context, message, user, command)
+        raise ApplicationHandlerStop
+
+    async def _send_command_hint(self, context: ContextTypes.DEFAULT_TYPE, message, user, command: str):
+        """DM the user where to send the command, or say so briefly in the group if the DM fails."""
+        title = message.chat.title or "this group"
+        try:
+            await context.bot.send_message(chat_id=user.id,
+                                           text=f"Commands don't work in {title} — send /{command} here instead.")
+            return
+        except Exception:
+            pass  # They haven't started the bot
+        try:
+            hint = await context.bot.send_message(
+                chat_id=message.chat.id,
+                message_thread_id=message.message_thread_id if message.is_topic_message else None,
+                text=f"{_mention(user)}, commands only work in a DM with me. Open it and send /{command} there.",
+                reply_markup=ui.open_dm_keyboard(context.bot.username),
+            )
+        except Exception as e:
+            print(f'Could not send command hint in chat {message.chat.id}: {e}')
+            return
+
+        async def _delete_later():
+            await asyncio.sleep(COMMAND_HINT_TTL)
+            try:
+                await hint.delete()
+            except Exception:
+                pass
+        context.application.create_task(_delete_later())
 
     # --- Users & roles ---
 
@@ -1111,12 +1194,28 @@ class BotHandlers:
         if not args:
             await reply(ui.config_text(self.settings, CONFIG_KEYS))
             return
+        if len(args) == 1 and args[0].lower() in ("allowhere", "denyhere"):
+            await self._config_command_chat(update, args[0].lower() == "allowhere")
+            return
+        # command_chats may be given as "-100123, -100456"
+        if args[0].lower() == "set" and len(args) > 3 and args[1].lower() == "command_chats":
+            args = args[:2] + ["".join(args[2:])]
         if args[0].lower() != "set" or len(args) != 3 or args[1].lower() not in CONFIG_KEYS:
             await reply(CONFIG_USAGE)
             return
 
         key, raw = args[1].lower(), args[2]
-        if key == "update_interval":
+        if key == "dm_only_commands":
+            if raw.lower() not in ("true", "false", "on", "off"):
+                await reply("dm_only_commands must be true or false.")
+                return
+            value = raw.lower() in ("true", "on")
+        elif key == "command_chats":
+            value = [] if raw.lower() in ("none", "off") else [chat for chat in raw.split(",") if chat]
+            if not all(re.fullmatch(r"-?\d+", chat) for chat in value):
+                await reply("command_chats must be chat ids separated by commas (e.g. -100123,-100456), or none.")
+                return
+        elif key == "update_interval":
             try:
                 value = float(raw)
             except ValueError:
@@ -1146,6 +1245,32 @@ class BotHandlers:
         await self.ms.log_message(f"Config change: {self.storage.display_name(update.effective_user.id)} "
                                   f"set {key} from {old} to {value}.")
         await reply(f"{key} set to {value}.")
+
+    async def _config_command_chat(self, update: Update, allow: bool):
+        """/config allowhere|denyhere: add this group to command_chats or remove it."""
+        reply = update.effective_message.reply_text
+        chat = update.effective_chat
+        if chat.type == "private":
+            await reply("Run this in the group you want to allow or deny commands in.")
+            return
+        chat_id = str(chat.id)
+        chats = self.settings.command_chats
+        if allow == (chat_id in chats):
+            await reply(f"This chat is {'already' if allow else 'not'} in command_chats.")
+            return
+        if allow:
+            chats.append(chat_id)
+        else:
+            chats.remove(chat_id)
+        self.settings.save()
+        await self.ms.log_message(f"Config change: {self.storage.display_name(update.effective_user.id)} "
+                                  f"{'allowed' if allow else 'removed'} commands in {chat.title} ({chat_id}).")
+        if allow:
+            await reply("Commands now work in this chat.")
+        elif chat_id in self._command_chat_ids():
+            await reply("Removed from command_chats, but commands still work here because it's the status or log chat.")
+        else:
+            await reply("Commands no longer work in this chat. Use them in a DM with the bot.")
 
     @staticmethod
     def _printer_field_error(field: str, value: str) -> str | None:

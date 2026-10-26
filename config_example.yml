@@ -19,6 +19,13 @@ update_interval: 3          # seconds between printer polls (owner can change wi
 stats_log_interval: 3600    # seconds between update timing/status reports, or null to disable
 auto_restart_printers: true # false to only log idle printers with no camera instead of rebooting them
 
+# Commands only work in DMs with the bot and in these group chats: the status chat, the log
+# chat (unless one of them is the main chat) and command_chats. Elsewhere, notably the main
+# chat, the bot deletes the command (if it may) and tells the sender to use the DM.
+# The owner can change these with /config set, or /config allowhere|denyhere in a group.
+dm_only_commands: true      # false to take commands in every chat again
+command_chats: []           # extra group chat ids, e.g. ['-1001234567890']
+
 # Set a command to true to turn it off. A disabled /staff also leaves the owner as the
 # only role: admins and mods are treated as users until it is turned back on.
 # (/forceunclaim can't be turned off, so admins can still free up a printer.)

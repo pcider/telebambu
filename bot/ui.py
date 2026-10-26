@@ -5,6 +5,7 @@ from data import Role
 from data.storage import PrintSession, Storage
 
 USER_HELP = (
+    "Use commands in a DM with the bot. In groups they only work in the staff chats.\n\n"
     "Available commands:\n"
     "/help - Show this help message\n"
     "/info - Summary of your claimed and watched prints\n"
@@ -49,8 +50,11 @@ OWNER_HELP = (
     "Owner commands:\n"
     "/staff edit <admin|mod|user> <user> - Add or remove admins and mods\n"
     "/staff edit owner <user> - Transfer ownership (you become an admin)\n"
-    "/config - Show chat targets and update interval\n"
-    "/config set <chat_id|status_chat_id|log_chat_id|update_interval> <value> - Change them"
+    "/config - Show chat targets and other settings\n"
+    "/config set <chat_id|status_chat_id|log_chat_id|update_interval> <value> - Change them\n"
+    "/config set dm_only_commands <true|false> - Only take commands in DMs and command chats\n"
+    "/config set command_chats <id,id,...|none> - Extra group chats where commands work\n"
+    "/config allowhere|denyhere - Add or remove the group you send it in"
 )
 
 
@@ -130,6 +134,10 @@ def camera_keyboard(printer_num: int, unclaim: bool = False) -> InlineKeyboardMa
 def start_dm_keyboard(bot_username: str, printer_num: int) -> InlineKeyboardMarkup:
     url = f"https://t.me/{bot_username}?start=claim-{printer_num}"
     return InlineKeyboardMarkup([[InlineKeyboardButton("Start DM with bot", url=url)]])
+
+
+def open_dm_keyboard(bot_username: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Open DM", url=f"https://t.me/{bot_username}?start=")]])
 
 
 def _unclaim_help_row(printer_num: int) -> list[InlineKeyboardButton]:
