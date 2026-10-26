@@ -26,8 +26,10 @@ latency_warn_seconds: 10    # log when a printer sends no update (or a poll take
 auto_restart_printers: true # false to only log idle printers with no camera instead of rebooting them
 low_filament_alerts: false  # true to warn claimers of low filament; false only logs what would have been sent
 log_commands: false         # true to post every command and button press to the log chat (owner can change with /config)
+ruined_report_timeout: 10   # seconds to wait for the cause after "Report ruined print" (owner can change with /config)
 
 # Set a command to true to turn it off (the owner can use /config disable|enable <command>).
+# ruined_report is the "Report ruined print" button.
 # A disabled /staff also leaves the owner as the
 # only role: admins and mods are treated as users until it is turned back on.
 # (/forceunclaim can't be turned off, so admins can still free up a printer.)
@@ -44,6 +46,7 @@ disabled_commands:
   reportbug: false
   suggestfeature: false
   anonymous: false  # true stops users changing it; names already hidden stay hidden
+  ruined_report: false
 
 # Printers by number. Admins can manage these with /printer.
 printers:

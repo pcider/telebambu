@@ -66,7 +66,7 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    restart. The bot rewrites `config.yml` when settings change, so hand-written comments are not kept.
    - `/config set <key> <value>` for `chat_id`, `status_chat_id`, `log_chat_id` (`none` turns the
      log chat off), `feedback_chat_id` and `feedback_thread_id` (`none` clears them), `update_interval`, `stats_log_interval` (`none` turns the report off),
-     `latency_warn_seconds` (`off` turns it off), and `auto_restart_printers`,
+     `latency_warn_seconds` (`off` turns it off), `ruined_report_timeout` (seconds), and `auto_restart_printers`,
      `low_filament_alerts` and `log_commands` (`true`/`false`).
    - `thread_id`, `status_thread_id` and `log_thread_id` set just the topic of those chats
      (`none` for no topic).
@@ -96,7 +96,8 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    is logged without its values (`/printer add [redacted]`), as they hold access codes and serials.
 
    `disabled_commands` turns individual commands off: set `print`, `speed`, `skip`, `staff`,
-   `forcereclaim`, `restart`, `restartall`, `home`, `beep`, `reportbug`, `suggestfeature` or `anonymous` to `true`. Disabled commands are hidden from
+   `forcereclaim`, `restart`, `restartall`, `home`, `beep`, `reportbug`, `suggestfeature`, `anonymous` or
+   `ruined_report` (the "Report ruined print" button) to `true`. Disabled commands are hidden from
    `/help` and the command menu and reply that they are disabled. `staff: true` also leaves the
    owner as the only role: admins and mods are treated as ordinary users, but their roles stay in
    `data.json` and come back when `staff` is set to `false` again. `anonymous: true` only stops
@@ -211,7 +212,7 @@ sudo systemctl start telebambu
 **Owner**
 - `/staff edit <admin|mod|user> <user>` - Add or remove admins and mods
 - `/staff edit owner <user>` - Transfer ownership (asks for confirmation; you become an admin)
-- `/config` / `/config set <key> <value>` - Show or change settings (chats, topics, `feedback_chat_id`, `feedback_thread_id`, intervals, `latency_warn_seconds`, `auto_restart_printers`, `low_filament_alerts`, `log_commands`)
+- `/config` / `/config set <key> <value>` - Show or change settings (chats, topics, `feedback_chat_id`, `feedback_thread_id`, intervals, `latency_warn_seconds`, `ruined_report_timeout`, `auto_restart_printers`, `low_filament_alerts`, `log_commands`)
 - `/config here <chat_id|status_chat_id|log_chat_id>` - Point that chat target at the chat and topic the command is sent in
 - `/config disable <command>` / `/config enable <command>` - Turn a command off or on
 
@@ -229,6 +230,14 @@ which tells you to send `/claim <printer>` there; claiming in the DM makes sure 
 - Enable/disable Layer 2 progress notifications
 - Turn anonymous on or off (same as `/anonymous`)
 - Access the printer's camera, with a Refresh button on images in your DM
+
+A claimed print's main chat message (and its failure/cancel message, when that goes to the main chat)
+has a **⚠️ Report ruined print** button, so anyone at the lab who sees spaghetti or a detached print can
+tell the claimer. The bot asks the presser for the cause; their reply is sent to the claimer's DM (or the
+main chat if the DM is refused) and posted to the log chat. The question, the reply and the bot's short
+confirmation are then deleted to keep the main chat clean (deleting the reply needs delete rights).
+Unanswered questions are deleted after `ruined_report_timeout` seconds (default 10) without telling the
+claimer. One question per printer at a time; pending questions are lost on restart.
 
 ## Project Structure
 

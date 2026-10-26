@@ -58,6 +58,10 @@ OWNER_HELP = (
     "/config disable <command> / /config enable <command> - Turn a command off or on"
 )
 
+# Shown under the user commands unless disabled_commands turns the button off
+RUINED_HELP = ("The \"Report ruined print\" button on a claimed print in the main chat tells its claimer "
+               "the print has failed (spaghetti, detached, ...). Reply to the bot's question with the cause.")
+
 
 def _without_disabled(text: str, disabled: frozenset[str]) -> str:
     """Help text without the lines for disabled commands."""
@@ -71,6 +75,8 @@ def _without_disabled(text: str, disabled: frozenset[str]) -> str:
 def help_text(role: Role, disabled: frozenset[str] = frozenset()) -> str:
     """Help listing only the commands the user's role can use."""
     sections = [USER_HELP]
+    if "ruined_report" not in disabled:
+        sections.append(RUINED_HELP)
     if role >= Role.ADMIN:
         sections.append(ADMIN_HELP)
     if role == Role.OWNER:
@@ -145,6 +151,15 @@ def camera_keyboard(printer_num: int, unclaim: bool = False) -> InlineKeyboardMa
     if unclaim:
         row.append(InlineKeyboardButton("Unclaim Print", callback_data=f"unclaim:{printer_num}"))
     return InlineKeyboardMarkup([row])
+
+
+def with_ruined_button(printer_num: int, claimer_id: int,
+                       keyboard: InlineKeyboardMarkup | None = None) -> InlineKeyboardMarkup:
+    """A main chat keyboard with a row for reporting the claimer's print as ruined.
+    The claimer is in the button, so it still works on failure messages after the session ended."""
+    rows = list(keyboard.inline_keyboard) if keyboard else []
+    rows.append([InlineKeyboardButton("⚠️ Report ruined print", callback_data=f"ruined:{printer_num}:{claimer_id}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def start_dm_keyboard(bot_username: str, printer_num: int) -> InlineKeyboardMarkup:

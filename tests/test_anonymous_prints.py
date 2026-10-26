@@ -188,7 +188,8 @@ class AnonymousPrints(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.storage.is_anonymous(CLAIMER))
         self.assertTrue(self.storage.get_print(3).anonymous)
         main_edit = [text for chat_id, text in self.bot.sent if chat_id == MAIN][-1]
-        self.assertEqual(main_edit, f'Printer 3 started by {ui.ANONYMOUS_NAME} (time: 1h, layers: 100)')
+        # The edit keeps the main chat keyboard (the "Report ruined print" button)
+        self.assertEqual(main_edit, f'Printer 3 started by {ui.ANONYMOUS_NAME} (time: 1h, layers: 100) ⚠️ Report ruined print')
         self.assertIn('Anonymous is ON', self.bot.sent[-1][1])
 
         self.context.args = []

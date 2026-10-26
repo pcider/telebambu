@@ -25,10 +25,11 @@ HEADER = """\
 """
 
 
-# Commands that config.yml can turn off one by one. A disabled /staff also leaves the owner
-# as the only role: admins and mods act as users until it is turned back on.
+# Commands that config.yml can turn off one by one ('ruined_report' is the "Report ruined print"
+# button, not a command). A disabled /staff also leaves the owner as the only role: admins and
+# mods act as users until it is turned back on.
 DISABLEABLE_COMMANDS = ('print', 'speed', 'skip', 'staff', 'forcereclaim', 'restart', 'restartall', 'home',
-                        'beep', 'reportbug', 'suggestfeature', 'anonymous')
+                        'beep', 'reportbug', 'suggestfeature', 'anonymous', 'ruined_report')
 
 
 @dataclass
@@ -58,6 +59,8 @@ class Settings:
     low_filament_alerts: bool = False
     # Post every command and button press to the log chat
     log_commands: bool = False
+    # Seconds a "Report ruined print" question waits for the presser's reply before it is deleted
+    ruined_report_timeout: float = 10
     # One flag per command in DISABLEABLE_COMMANDS; true turns that command off
     disabled_commands: dict[str, bool] = field(default_factory=lambda: dict.fromkeys(DISABLEABLE_COMMANDS, False))
     printers: dict[int, PrinterConfig] = field(default_factory=dict)
@@ -82,7 +85,7 @@ class Settings:
 
 # Settings that may be left out of config.yml (or config.py, in upper case) to use the default
 OPTIONAL_KEYS = ('update_interval', 'stats_log_interval', 'latency_warn_seconds', 'auto_restart_printers',
-                 'low_filament_alerts', 'log_commands')
+                 'low_filament_alerts', 'log_commands', 'ruined_report_timeout')
 
 
 def _chat(value) -> Optional[str]:
