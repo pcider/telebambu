@@ -22,9 +22,10 @@ from settings import DISABLEABLE_COMMANDS, PrinterConfig, Settings
 
 NOTIFY_USAGE = "Usage: /notify [printer] <layer> or /notify [printer] <percent>%"
 NOTIFY_EVERY_USAGE = "Usage: /notify_every [printer] layers <number>, time <minutes>, percent <number>, or off"
-CONFIG_USAGE = "Usage: /config or /config set <chat_id|status_chat_id|log_chat_id|update_interval> <value>"
+CONFIG_USAGE = ("Usage: /config or /config set "
+                "<chat_id|status_chat_id|log_chat_id|update_interval|log_commands> <value>")
 # Settings the owner can change at runtime; chat targets are 'chat_id' or 'chat_id/thread_id'
-CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "update_interval")
+CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "update_interval", "log_commands")
 MIN_UPDATE_INTERVAL = 1  # seconds
 PRINTER_USAGE = (
     "Usage:\n"
@@ -73,6 +74,18 @@ def _mention(user) -> str:
     return f"@{user.username}" if user.username else user.full_name
 
 
+def _logged_command(text: str) -> str:
+    """A command as written to the log chat, without secrets: /printer arguments can hold
+    access codes and serial numbers, so only its subcommand is kept."""
+    command, _, rest = text.partition(" ")
+    if command.split("@", 1)[0].lower() != "/printer":
+        return text
+    args = rest.replace(",", " ").split()
+    if not args:
+        return command
+    return f"{command} {args[0]}" + (" [redacted]" if len(args) > 1 else "")
+
+
 def _replied_to(message):
     """The message this one deliberately replies to, if any.
 
@@ -100,6 +113,8 @@ class BotHandlers:
     def register(self, app: Application):
         # Runs before every other handler so @usernames can be resolved later
         app.add_handler(TypeHandler(Update, self.track_user), group=-1)
+        # Its own group, as only the first matching handler in a group runs
+        app.add_handler(TypeHandler(Update, self.log_command), group=-2)
 
         commands = {
             "start": self.cmd_start,
@@ -161,6 +176,47 @@ class BotHandlers:
         user = update.effective_user
         if user and not user.is_bot:
             self.storage.remember_user(user.id, user.username, user.full_name)
+
+    async def log_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Post commands and button presses to the log chat when log_commands is on.
+
+        Runs before the command itself, so commands that are then refused are logged too.
+        """
+        if not self.settings.log_commands:
+            return
+        try:
+            await self._log_command(update, context)
+        except Exception as e:
+            print(f"Failed to log command: {e}")
+
+    async def _log_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if update.callback_query:
+            kind, text, message = "Button", update.callback_query.data, update.callback_query.message
+        else:
+            message = update.message or update.edited_message
+            text = message and (message.text or message.caption)
+            if not text or not text.startswith("/"):
+                return
+            # Commands meant for another bot in the group
+            target = text.split(maxsplit=1)[0].partition("@")[2]
+            if target and target.lower() != (context.bot.username or "").lower():
+                return
+            kind, text = "Command", _logged_command(text)
+        if user is None or text is None:
+            return
+
+        chat = update.effective_chat
+        if chat is None:
+            where = "unknown chat"
+        elif chat.type == "private":
+            where = "DM"
+        else:
+            where = f"{chat.title} ({chat.id}"
+            if message is not None and getattr(message, "is_topic_message", False):
+                where += f", thread {message.message_thread_id}"
+            where += ")"
+        await self.ms.log_message(f"{kind}: {_mention(user)} ({user.id}) in {where}: {text}")
 
     def is_admin(self, user_id: int) -> bool:
         return self.storage.get_role(user_id) >= Role.ADMIN
@@ -1101,7 +1157,7 @@ class BotHandlers:
         await reply(f"{name} is now {new_role.label}.")
 
     async def cmd_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Owner only: show or change chat targets and the update interval."""
+        """Owner only: show or change chat targets, the update interval and command logging."""
         reply = update.effective_message.reply_text
         if self.storage.get_role(update.effective_user.id) != Role.OWNER:
             await reply("Only the owner can use this command.")
@@ -1126,6 +1182,11 @@ class BotHandlers:
                 await reply(f"update_interval must be a number of seconds, at least {MIN_UPDATE_INTERVAL}.")
                 return
             value = int(value) if value.is_integer() else value
+        elif key == "log_commands":
+            if raw.lower() not in ("true", "false", "on", "off"):
+                await reply("log_commands must be true or false.")
+                return
+            value = raw.lower() in ("true", "on")
         elif key == "log_chat_id" and raw.lower() in ("none", "off"):
             value = None
         else:
