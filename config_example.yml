@@ -43,6 +43,7 @@ disabled_commands:
   beep: false
   reportbug: false
   suggestfeature: false
+  anonymous: false  # true stops users changing it; names already hidden stay hidden
 
 # Printers by number. Admins can manage these with /printer.
 printers:

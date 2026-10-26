@@ -274,6 +274,7 @@ class BotHandlers:
             "light": self.cmd_light,
             "claim": self.cmd_claim,
             "unclaim": self.cmd_unclaim,
+            "anonymous": self.cmd_anonymous,
             "forcereclaim": self.cmd_forcereclaim,
             "forceunclaim": self.cmd_forceunclaim,
             "restart": self.cmd_restart,
@@ -300,6 +301,7 @@ class BotHandlers:
             _callback_pattern("dmpref", "dm_pref", ":(chat|dm)"): self.cb_dm_preference,
             _callback_pattern("layer2", "layer2_toggle"): self.cb_layer2_toggle,
             _callback_pattern("unclaim", "unclaim"): self.cb_unclaim,
+            r"^anon:\d+$": self.cb_anonymous_toggle,
             r"^cam:\d+$": self.cb_refresh_camera,
             r"^help$": self.cb_help,
         }
@@ -477,8 +479,12 @@ class BotHandlers:
             dm_sent = True
         except Exception:
             dm_sent = False
-            text += f"\n\n{username}, please start a conversation with the bot to configure your print settings:"
+            name = ui.public_claimer_name(session)
+            text += f"\n\n{name[:1].upper() + name[1:]}, please start a conversation with the bot to configure your print settings:"
             reply_markup = ui.start_dm_keyboard(context.bot.username, printer_num)
+        if session.anonymous:
+            # The main chat doesn't show who claimed it, so keep a record in the log chat
+            await self.ms.log_message(f"{username} claimed Printer {printer_num} anonymously.")
 
         try:
             await context.bot.edit_message_text(chat_id=session.chat_id, message_id=session.message_id,
@@ -620,7 +626,7 @@ class BotHandlers:
             line = self.pm.status_line(num) if num in self.pm else f"{num}: REMOVED"
             extras = ui.session_extras(session)
             if num in watched:
-                extras.insert(0, f"watching {session.claimed_username}'s print")
+                extras.insert(0, f"watching {ui.public_claimer_name(session)}'s print")
             lines.append(line + (f" [{'; '.join(extras)}]" if extras else ""))
         await update.effective_message.reply_text(ui.code_block("Your prints:", lines), parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -1024,7 +1030,7 @@ class BotHandlers:
             await reply(f"You have already claimed Printer {printer_num}.")
             return
         if session.claimed_by:
-            await reply(f"Printer {printer_num} is already claimed by {session.claimed_username}.")
+            await reply(f"Printer {printer_num} is already claimed by {ui.public_claimer_name(session)}.")
             return
 
         if await self._claim(context, user.id, _mention(user), printer_num):
@@ -1053,7 +1059,7 @@ class BotHandlers:
             await reply(self._unknown_user_text(token))
             return
         if session.claimed_by == new_claimer:
-            await reply(f"{session.claimed_username} already has Printer {printer_num}.")
+            await reply(f"{ui.public_claimer_name(session)} already has Printer {printer_num}.")
             return
 
         old_claimer, old_name = session.claimed_by, session.claimed_username
@@ -1064,8 +1070,9 @@ class BotHandlers:
         admin_name = self.storage.display_name(update.effective_user.id)
         if old_claimer:
             try:
+                new_public = ui.public_claimer_name(self.storage.get_print(printer_num))
                 await context.bot.send_message(chat_id=old_claimer,
-                                               text=f"{admin_name} reassigned Printer {printer_num} to {new_name}.")
+                                               text=f"{admin_name} reassigned Printer {printer_num} to {new_public}.")
             except Exception:
                 pass
         await self.ms.log_message(f"Force reclaim: {admin_name} gave Printer {printer_num} "
@@ -1091,6 +1098,7 @@ class BotHandlers:
             await reply(f"Printer {printer_num} isn't claimed.")
             return
         old_claimer, old_name = session.claimed_by, session.claimed_username
+        old_public = ui.public_claimer_name(session)
         unclaimed = await self._unclaim(context, printer_num, log=False)
 
         admin_name = self.storage.display_name(update.effective_user.id)
@@ -1100,7 +1108,7 @@ class BotHandlers:
             pass
         await self.ms.log_message(f"Force unclaim: {admin_name} unclaimed Printer {printer_num} from {old_name}.")
         # _unclaim's reply is worded for the claimer; keep its warning if the main chat wasn't updated
-        await reply(f"Unclaimed Printer {printer_num} from {old_name}."
+        await reply(f"Unclaimed Printer {printer_num} from {old_public}."
                     if unclaimed.startswith("You have") else unclaimed)
 
     async def cmd_unclaim(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1110,6 +1118,40 @@ class BotHandlers:
             return
         printer_num, _ = resolved
         await update.effective_message.reply_text(await self._unclaim(context, printer_num))
+
+    async def cmd_anonymous(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Hide or show the user's name on their current and future prints."""
+        message = update.effective_message
+        # Saying "/anonymous on" in a group would give away who it is
+        if message.chat.type != "private":
+            await message.reply_text("Please use /anonymous in a private chat with the bot.")
+            return
+        user_id = update.effective_user.id
+        arg = context.args[0].lower() if context.args else ""
+        if arg not in ("", "on", "off"):
+            await message.reply_text("Usage: /anonymous [on|off]")
+            return
+        if arg:
+            await self._set_anonymous(context, user_id, arg == "on")
+        if self.storage.is_anonymous(user_id):
+            await message.reply_text("Anonymous is ON: other users see your prints as claimed by "
+                                     f"{ui.ANONYMOUS_NAME}. Admins can still see who claimed them in the log chat. "
+                                     "Turn it off with /anonymous off.")
+        else:
+            await message.reply_text("Anonymous is OFF: your name is shown on your prints. "
+                                     "Turn it on with /anonymous on.")
+
+    async def _set_anonymous(self, context: ContextTypes.DEFAULT_TYPE, user_id: int, enabled: bool):
+        """Save the setting and update the main chat messages of the user's current claims."""
+        for num in self.storage.set_anonymous(user_id, enabled):
+            session = self.storage.get_print(num)
+            try:
+                await context.bot.edit_message_text(chat_id=session.chat_id, message_id=session.message_id,
+                                                    text=ui.claimed_text(num, session))
+            except Exception as e:
+                print(f'Could not update main chat message for Printer {num} anonymity: {e}')
+        await self.ms.log_message(f"{self.storage.display_name(user_id)} turned anonymous "
+                                  f"{'on' if enabled else 'off'}.")
 
     async def _restart_many(self, update: Update, printer_nums: list[int]):
         """Restart printers concurrently and reply with one line per printer."""
@@ -1611,7 +1653,7 @@ class BotHandlers:
             return
 
         self.storage.set_dm_preference(printer_num, preference)
-        text, keyboard = ui.settings_message(printer_num, self.storage.get_print(printer_num))
+        text, keyboard = self._settings_message(printer_num)
         await query.edit_message_text(text, reply_markup=keyboard)
 
     async def cb_layer2_toggle(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1622,8 +1664,26 @@ class BotHandlers:
             return
 
         self.storage.set_layer2_notify(printer_num, not session.layer2_notify)
-        text, keyboard = ui.settings_message(printer_num, self.storage.get_print(printer_num))
+        text, keyboard = self._settings_message(printer_num)
         await query.edit_message_text(text, reply_markup=keyboard)
+
+    async def cb_anonymous_toggle(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        printer_num, _ = _parse_callback(query)
+        if self.settings.is_disabled("anonymous"):
+            await query.answer("/anonymous is disabled on this bot.", show_alert=True)
+            return
+        session = await self._claimer_session(query, printer_num)
+        if not session:
+            return
+
+        await self._set_anonymous(context, query.from_user.id, not session.anonymous)
+        text, keyboard = self._settings_message(printer_num)
+        await query.edit_message_text(text, reply_markup=keyboard)
+
+    def _settings_message(self, printer_num: int):
+        return ui.settings_message(printer_num, self.storage.get_print(printer_num),
+                                   anonymous_toggle=not self.settings.is_disabled("anonymous"))
 
     async def cb_unclaim(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query

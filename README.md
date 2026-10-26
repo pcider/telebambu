@@ -12,6 +12,7 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
 - Filament run-out alerts to a print's claimer and anyone added with `/notify_user`. Low filament alerts (10% or less on the spool in use) are off by default (`low_filament_alerts: false`) because they gave false alarms; while off, each match is only logged to the log chat with the printer's raw tray report so it can be debugged. The owner turns them back on with `/config set low_filament_alerts true`
 - Persistent status message showing all printer states
 - Configurable notification preferences (chat or DM)
+- Opt-in anonymous prints: claimers can hide their name from other users (`/anonymous`)
 
 ## Requirements
 
@@ -95,10 +96,11 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    is logged without its values (`/printer add [redacted]`), as they hold access codes and serials.
 
    `disabled_commands` turns individual commands off: set `print`, `speed`, `skip`, `staff`,
-   `forcereclaim`, `restart`, `restartall`, `home`, `beep`, `reportbug` or `suggestfeature` to `true`. Disabled commands are hidden from
+   `forcereclaim`, `restart`, `restartall`, `home`, `beep`, `reportbug`, `suggestfeature` or `anonymous` to `true`. Disabled commands are hidden from
    `/help` and the command menu and reply that they are disabled. `staff: true` also leaves the
    owner as the only role: admins and mods are treated as ordinary users, but their roles stay in
-   `data.json` and come back when `staff` is set to `false` again.
+   `data.json` and come back when `staff` is set to `false` again. `anonymous: true` only stops
+   users changing the setting; names that are already hidden stay hidden.
 
    Changes made with `/config disable|enable` take effect at once; edits to `config.yml` by hand
    take effect after a restart.
@@ -182,6 +184,7 @@ sudo systemctl start telebambu
 - `/info <printer>` - Progress, time remaining, layer, file name, temperatures, speed, loaded filament (AMS slots and external spool, with % left) and pending notifications for a print
 - `/claim <printer>` - Claim an unclaimed print (send it in your DM with the bot)
 - `/unclaim [printer]` - Release your claim on a print
+- `/anonymous [on|off]` - In a DM with the bot: hide your name on your current and future prints (no argument shows the setting). Other users see "an anonymous user" in the main chat, button alerts, `/info` and watcher lists; only the log chat and your own DM show who claimed
 - `/notify [printer] <layer>` or `/notify [printer] <percent>%` - One-time notification with a camera snapshot at a milestone
 - `/notify_every [printer] layers|time|percent <number>` - Recurring camera snapshots during a print (`off` to disable)
 - `/notify_user <printer> <user> [user ...]` - Also notify other users about a claimed print (`remove` to stop, no users to list); the claimer and anyone already notified can use it
@@ -224,6 +227,7 @@ which tells you to send `/claim <printer>` there; claiming in the DM makes sure 
 - Receive the finish notification directly
 - Choose between chat or DM delivery
 - Enable/disable Layer 2 progress notifications
+- Turn anonymous on or off (same as `/anonymous`)
 - Access the printer's camera, with a Refresh button on images in your DM
 
 ## Project Structure

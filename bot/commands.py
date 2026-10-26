@@ -15,6 +15,7 @@ COMMANDS = (
     CommandDefinition("info", "Show your prints or a print's details"),
     CommandDefinition("claim", "Claim an unclaimed print"),
     CommandDefinition("unclaim", "Release a claimed print"),
+    CommandDefinition("anonymous", "Hide your name on your prints"),
     CommandDefinition("notify", "Set a one-time notification"),
     CommandDefinition("notify_every", "Set recurring camera notifications"),
     CommandDefinition("notify_user", "Notify other users about a print"),

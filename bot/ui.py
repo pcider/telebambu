@@ -11,6 +11,7 @@ USER_HELP = (
     "/info <printer> - Details about a print\n"
     "/claim <printer> - Claim an unclaimed print\n"
     "/unclaim [printer] - Unclaim your print\n"
+    "/anonymous [on|off] - Hide your name on your prints from other users (in a DM with the bot)\n"
     "/notify [printer] <layer> - Send a one-time notification at a layer\n"
     "/notify [printer] <percent>% - Send a one-time notification at a percentage\n"
     "/notify_every [printer] layers|time|percent <number> - Send recurring camera snapshots\n"
@@ -86,6 +87,15 @@ SESSION_ENDED = "This print session has ended."
 CLAIM_DM_PROMPT = "Where would you like to receive the finished print image?"
 # Marks messages about prints the bot only noticed after a restart
 CATCHUP_TAG = "[catchup] "
+# Shown instead of the claimer's name when they chose /anonymous
+ANONYMOUS_NAME = "an anonymous user"
+
+
+def public_claimer_name(session: PrintSession) -> str:
+    """The claimer's name for anything other users can see. Only the log chat uses the real name."""
+    if session.anonymous:
+        return ANONYMOUS_NAME
+    return session.claimed_username or f"user {session.claimed_by}"
 
 
 def _print_details(session: PrintSession) -> str:
@@ -108,7 +118,7 @@ def started_text(printer_num: int, session: PrintSession) -> str:
 def claimed_text(printer_num: int, session: PrintSession) -> str:
     """Main chat text for a claimed print."""
     tag = CATCHUP_TAG if session.catchup else ""
-    return f"{tag}Printer {printer_num} started by {session.claimed_username}{_print_details(session)}"
+    return f"{tag}Printer {printer_num} started by {public_claimer_name(session)}{_print_details(session)}"
 
 
 def claim_link(bot_username: str, printer_num: int) -> str:
@@ -158,21 +168,25 @@ def dm_preference_keyboard(printer_num: int) -> InlineKeyboardMarkup:
     ])
 
 
-def settings_message(printer_num: int, session: PrintSession) -> tuple[str, InlineKeyboardMarkup]:
+def settings_message(printer_num: int, session: PrintSession,
+                     anonymous_toggle: bool = True) -> tuple[str, InlineKeyboardMarkup]:
+    """The claimer's settings. ``anonymous_toggle`` is False while /anonymous is disabled."""
     destination = "main chat" if session.dm_preference == "chat" else "here privately"
     layer2_status = "ON" if session.layer2_notify else "OFF"
+    anonymous_status = "ON" if session.anonymous else "OFF"
 
     text = (
         f"Settings for Printer {printer_num}:\n"
         f"- Finished image: {destination}\n"
-        f"- Layer 2 notification: {layer2_status}\n\n"
+        f"- Layer 2 notification: {layer2_status}\n"
+        f"- Anonymous (name hidden from others): {anonymous_status}\n\n"
         f"You can use /camera {printer_num} to check on your print while it's active."
     )
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"Layer 2 Notify: {layer2_status}", callback_data=f"layer2:{printer_num}")],
-        _unclaim_help_row(printer_num),
-    ])
-    return text, keyboard
+    rows = [[InlineKeyboardButton(f"Layer 2 Notify: {layer2_status}", callback_data=f"layer2:{printer_num}")]]
+    if anonymous_toggle:
+        rows.append([InlineKeyboardButton(f"Anonymous: {anonymous_status}", callback_data=f"anon:{printer_num}")])
+    rows.append(_unclaim_help_row(printer_num))
+    return text, InlineKeyboardMarkup(rows)
 
 
 def staff_list_text(storage: Storage) -> str:
@@ -205,10 +219,11 @@ def printer_list_text(printers: dict, printer_manager) -> str:
 
 def watchers_text(printer_num: int, session: PrintSession, storage: Storage) -> str:
     names = ", ".join(storage.display_name(uid) for uid in session.watchers)
+    claimer = public_claimer_name(session)
     if not names:
-        return (f"Only {session.claimed_username} is notified about Printer {printer_num}. "
+        return (f"Only {claimer} is notified about Printer {printer_num}. "
                 f"Add others with /notify_user {printer_num} <user>.")
-    return f"Printer {printer_num} notifies {session.claimed_username} and: {names}"
+    return f"Printer {printer_num} notifies {claimer} and: {names}"
 
 
 # /notify_every types and the unit each one counts in
