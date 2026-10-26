@@ -62,9 +62,9 @@ Last reviewed 2026-10-26. Items marked **(ask Max first)** need a design decisio
 
 Each is one commit off `prod` (`cfec73c`) on its own branch, with tests, so it can be cherry-picked
 alone. `integration/2026-10-26` (`91f5e1c`) merges all of them plus `fix/low-filament-alert` with
-the conflicts and cross-feature interactions resolved (153 tests pass). Nothing has been tried
-against real Telegram or printers yet. Suggested path: deploy `integration/2026-10-26` to staging,
-test it live, then merge into `prod`.
+the conflicts and cross-feature interactions resolved. It's merged into `staging` (`550ac1c`,
+together with `feat/upload`; 159 tests pass). Nothing has been tried against real Telegram or
+printers yet. Next: run the staging bot, test it live, then merge into `prod`.
 
 - [ ] `feat/dm-only-commands` (`95f0c05`): commands only work in DMs and in the status/log chats
       plus `command_chats` (`/config allowhere|denyhere`). In other groups the command is deleted
