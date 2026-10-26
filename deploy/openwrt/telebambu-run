@@ -1,0 +1,13 @@
+#!/bin/sh
+# Foreground runner for the telebambu bot, supervised by procd (/etc/init.d/telebambu).
+# Install as /root/bin/telebambu-run. Output goes to telebambu.log in the checkout, as with start.sh.
+set -eu
+
+APP_DIR=${TELEBAMBU_DIR:-/root/telebambu}
+cd "$APP_DIR"
+
+rev=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+printf '\n--- BOT RESTARTED at %s; revision %s ---\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$rev" >> telebambu.log
+
+# exec so procd signals the Python process directly (main.py stops cleanly on SIGTERM).
+exec ./venv/bin/python -u main.py >> telebambu.log 2>&1

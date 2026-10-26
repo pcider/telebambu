@@ -1,0 +1,288 @@
+#!/bin/sh
+# Pull-based deploy for telebambu on OpenWrt. Install as /root/bin/telebambu-deploy and run from cron.
+# POSIX sh / busybox ash. Needs: git, python3 (with venv), curl or uclient-fetch, procd service
+# /etc/init.d/telebambu (telebambu.init) and /root/telebambu/venv as a symlink to a venv.
+#
+# Each run:
+#   1. fetch origin/$BRANCH; stop if HEAD already matches it (or it previously failed to deploy)
+#   2. require GitHub check runs for that commit to be complete and successful
+#   3. build a fresh venv only if requirements.txt changed (before stopping the bot)
+#   4. back up config.yml/data.json, check out the commit, switch the venv symlink, restart
+#   5. health check; on failure restore the previous commit + venv and restart
+#
+# Settings can be overridden with environment variables (see defaults below).
+# Usage: telebambu-deploy            normal run (cron)
+#        FORCE=1 telebambu-deploy    also retry a commit that failed before
+
+set -u
+umask 077
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+
+APP_DIR=${APP_DIR:-/root/telebambu}
+VENV_ROOT=${VENV_ROOT:-/root/telebambu-venvs}
+BACKUP_ROOT=${BACKUP_ROOT:-/root/telebambu-backups}
+STATE_DIR=${STATE_DIR:-/root/telebambu-deploy}
+LOG_FILE=${LOG_FILE:-$STATE_DIR/deploy.log}
+LOCK_DIR=${LOCK_DIR:-/var/lock/telebambu-deploy.lock}
+REMOTE=${REMOTE:-origin}
+BRANCH=${BRANCH:-prod}
+GITHUB_REPO=${GITHUB_REPO:-pcider/telebambu}
+GITHUB_API=${GITHUB_API:-https://api.github.com}
+TOKEN_FILE=${TOKEN_FILE:-/root/.telebambu-github-token}
+SERVICE=${SERVICE:-/etc/init.d/telebambu}
+PYTHON=${PYTHON:-python3}
+# Wait this long for "Bot started!" in the bot log, then this long more, then check it's still up.
+START_TIMEOUT=${START_TIMEOUT:-120}
+SETTLE_SECONDS=${SETTLE_SECONDS:-20}
+# Fail the health check if a Python traceback appears in the new log lines (1 = yes).
+FAIL_ON_TRACEBACK=${FAIL_ON_TRACEBACK:-1}
+# Run with a freshly built venv before it is used; must succeed.
+IMPORT_CHECK=${IMPORT_CHECK:-import telegram, bambulabs_api, yaml}
+FORCE=${FORCE:-0}
+
+BOT_LOG=$APP_DIR/telebambu.log
+FAILED_FILE=$STATE_DIR/failed-revision
+
+for n in "$START_TIMEOUT" "$SETTLE_SECONDS"; do
+    case "$n" in ''|*[!0-9]*) echo "START_TIMEOUT/SETTLE_SECONDS must be whole seconds" >&2; exit 2 ;; esac
+done
+mkdir -p "$STATE_DIR" "$VENV_ROOT" "$BACKUP_ROOT" || exit 1
+
+# Keep the deploy log from growing without bound (~1 MB, one old copy).
+if [ -f "$LOG_FILE" ] && [ "$(wc -c < "$LOG_FILE")" -gt 1048576 ]; then
+    mv -f "$LOG_FILE" "$LOG_FILE.1"
+fi
+
+log() {
+    printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$*" >> "$LOG_FILE"
+}
+
+die() {
+    log "ERROR: $*"
+    exit 1
+}
+
+# ---------------------------------------------------------------- lock
+# mkdir is atomic. A lock left by a dead process (power cut, kill -9) is removed.
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    other=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+    if [ -n "$other" ] && kill -0 "$other" 2>/dev/null; then
+        exit 0  # another deploy is running; stay quiet so cron doesn't spam the log
+    fi
+    log "removing stale lock (pid ${other:-unknown})"
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+fi
+echo "$$" > "$LOCK_DIR/pid"
+trap 'rm -rf "$LOCK_DIR"' EXIT
+trap 'exit 1' HUP INT TERM
+
+cd "$APP_DIR" || die "no checkout at $APP_DIR"
+
+# ---------------------------------------------------------------- what to deploy
+git fetch -q "$REMOTE" "$BRANCH" || die "git fetch $REMOTE $BRANCH failed"
+target=$(git rev-parse "$REMOTE/$BRANCH") || die "cannot resolve $REMOTE/$BRANCH"
+current=$(git rev-parse HEAD) || die "cannot resolve HEAD"
+
+[ "$target" = "$current" ] && exit 0
+
+if [ "$FORCE" != 1 ] && [ -f "$FAILED_FILE" ] && [ "$(cat "$FAILED_FILE")" = "$target" ]; then
+    exit 0  # already failed and rolled back; wait for a new commit (or FORCE=1)
+fi
+
+if [ "$(cat "$STATE_DIR/ci-failed-revision" 2>/dev/null)" != "$target" ]; then
+    log "$REMOTE/$BRANCH moved: $current -> $target"
+fi
+
+# ---------------------------------------------------------------- CI gate
+# GET /repos/{repo}/commits/{sha}/check-runs. The token file (optional) holds a fine-grained
+# read-only token; it's needed for a private repo and raises the API rate limit.
+api_url="$GITHUB_API/repos/$GITHUB_REPO/commits/$target/check-runs?per_page=100"
+token=
+[ -r "$TOKEN_FILE" ] && token=$(tr -d ' \r\n' < "$TOKEN_FILE")
+
+ci_json=$STATE_DIR/check-runs.json
+rm -f "$ci_json"
+fetched=no
+if command -v curl >/dev/null 2>&1; then
+    if [ -n "$token" ]; then
+        curl -fsS --max-time 30 -o "$ci_json" \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $token" "$api_url" 2>> "$LOG_FILE" && fetched=yes
+    else
+        curl -fsS --max-time 30 -o "$ci_json" \
+            -H 'Accept: application/vnd.github+json' "$api_url" 2>> "$LOG_FILE" && fetched=yes
+    fi
+elif command -v uclient-fetch >/dev/null 2>&1; then
+    [ -n "$token" ] && log "warning: uclient-fetch can't send the token; install curl for a private repo"
+    uclient-fetch -q -T 30 -O "$ci_json" "$api_url" 2>> "$LOG_FILE" && fetched=yes
+else
+    die "need curl or uclient-fetch to query GitHub"
+fi
+[ "$fetched" = yes ] && [ -s "$ci_json" ] || die "GitHub API request failed for $target"
+
+# Prints success / pending / failure. Every check run must be completed with
+# success, skipped or neutral, and there must be at least one.
+ci_state=$("$PYTHON" - "$ci_json" <<'EOF'
+import json, sys
+try:
+    runs = json.load(open(sys.argv[1])).get("check_runs", [])
+except Exception:
+    print("error"); sys.exit()
+if not runs:
+    print("pending")
+elif any(r.get("status") != "completed" for r in runs):
+    print("pending")
+elif all(r.get("conclusion") in ("success", "skipped", "neutral") for r in runs):
+    print("success")
+else:
+    print("failure")
+EOF
+)
+case "$ci_state" in
+    success) log "CI passed for $target" ;;
+    pending) log "CI not finished for $target; will retry next run"; exit 0 ;;
+    failure)
+        # Not marked as a failed deploy: a re-run of CI on the same commit can still pass.
+        # Log it once per commit so cron doesn't fill the log.
+        if [ "$(cat "$STATE_DIR/ci-failed-revision" 2>/dev/null)" != "$target" ]; then
+            log "CI failed for $target; not deploying (re-run CI or push a fix)"
+            echo "$target" > "$STATE_DIR/ci-failed-revision"
+        fi
+        exit 1 ;;
+    *)       die "could not read CI status for $target" ;;
+esac
+
+# ---------------------------------------------------------------- preflight
+[ -L venv ] || die "$APP_DIR/venv must be a symlink to a venv (see deploy/openwrt/README.md)"
+previous_env=$(readlink -f venv) || die "cannot resolve venv symlink"
+[ -x "$previous_env/bin/python" ] || die "current venv $previous_env has no bin/python"
+[ -z "$(git status --porcelain --untracked-files=no)" ] || die "checkout has local changes; not deploying"
+git cat-file -e "$target^{commit}" || die "$target is not a commit"
+
+# switch_venv <dir>: point the venv symlink at <dir> atomically.
+switch_venv() {
+    rm -f venv.next
+    ln -s "$1" venv.next && "$PYTHON" -c 'import os; os.replace("venv.next", "venv")'
+}
+
+if git diff --quiet "$current" "$target" -- requirements.txt; then
+    candidate_env=$previous_env
+    log "requirements.txt unchanged; keeping venv $candidate_env"
+else
+    candidate_env=$VENV_ROOT/$target
+    [ "$candidate_env" != "$previous_env" ] || die "candidate venv is the live venv"
+    rm -rf "$candidate_env"  # never reuse a partial venv from an earlier failed attempt
+    log "requirements.txt changed; building venv $candidate_env"
+    if ! "$PYTHON" -m venv "$candidate_env" >> "$LOG_FILE" 2>&1 \
+        || ! git show "$target:requirements.txt" > "$candidate_env/requirements.txt" \
+        || ! "$candidate_env/bin/python" -m pip install -q --disable-pip-version-check \
+                -r "$candidate_env/requirements.txt" >> "$LOG_FILE" 2>&1 \
+        || ! "$candidate_env/bin/python" -c "$IMPORT_CHECK" >> "$LOG_FILE" 2>&1
+    then
+        rm -rf "$candidate_env"
+        echo "$target" > "$FAILED_FILE"
+        die "building the venv for $target failed; bot not touched"
+    fi
+fi
+
+# ---------------------------------------------------------------- state backup
+backup=$BACKUP_ROOT/$(date +%Y%m%dT%H%M%S)-$target
+mkdir -p "$backup" || die "cannot create $backup"
+for f in config.yml data.json; do
+    if [ -f "$f" ]; then cp -p "$f" "$backup/$f" || die "backing up $f failed"; fi
+done
+echo "$current" > "$backup/previous-revision"
+echo "$previous_env" > "$backup/previous-environment"
+log "state backed up to $backup"
+
+# ---------------------------------------------------------------- health check
+# healthy <first-new-log-line>: 0 if the bot started, is still running, wasn't respawned
+# and logged no traceback since that line.
+healthy() {
+    from=$1
+    waited=0
+    until tail -n +"$from" "$BOT_LOG" 2>/dev/null | grep -q 'Bot started!'; do
+        if [ "$waited" -ge "$START_TIMEOUT" ]; then
+            log "health: no 'Bot started!' within ${START_TIMEOUT}s"
+            return 1
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+    sleep "$SETTLE_SECONDS"
+
+    running=no
+    if command -v jsonfilter >/dev/null 2>&1; then
+        ubus call service list '{"name":"telebambu"}' 2>/dev/null \
+            | jsonfilter -e '@.telebambu.instances.*.running' 2>/dev/null | grep -q true && running=yes
+    elif pgrep -f 'python -u main.py' >/dev/null 2>&1; then
+        running=yes
+    fi
+    if [ "$running" != yes ]; then
+        log "health: bot process not running"
+        return 1
+    fi
+
+    restarts=$(tail -n +"$from" "$BOT_LOG" | grep -c -- '--- BOT RESTARTED')
+    if [ "$restarts" -gt 1 ]; then
+        log "health: procd respawned the bot ($restarts starts)"
+        return 1
+    fi
+
+    if [ "$FAIL_ON_TRACEBACK" = 1 ] && tail -n +"$from" "$BOT_LOG" | grep -q '^Traceback '; then
+        log "health: traceback in the bot log:"
+        tail -n +"$from" "$BOT_LOG" | grep -A 20 '^Traceback ' | head -n 40 >> "$LOG_FILE"
+        return 1
+    fi
+    return 0
+}
+
+log_mark() {
+    if [ -f "$BOT_LOG" ]; then echo $(( $(wc -l < "$BOT_LOG") + 1 )); else echo 1; fi
+}
+
+# ---------------------------------------------------------------- deploy
+rolled_back=0
+# shellcheck disable=SC2329  # called from the EXIT trap
+rollback() {
+    [ "$rolled_back" = 1 ] && return
+    rolled_back=1
+    log "ROLLBACK to $current (venv $previous_env)"
+    "$SERVICE" stop >/dev/null 2>&1
+    git checkout -q --detach "$current" || log "rollback: git checkout $current failed"
+    switch_venv "$previous_env" || log "rollback: venv switch failed"
+    mark=$(log_mark)
+    "$SERVICE" start >/dev/null 2>&1
+    if healthy "$mark"; then
+        log "rollback complete; bot running $current"
+    else
+        log "rollback: bot still unhealthy on $current - check $BOT_LOG by hand"
+    fi
+}
+
+# From here a failure or signal rolls back. The EXIT trap also releases the lock.
+# shellcheck disable=SC2329  # EXIT trap handler
+on_exit() {
+    status=$?
+    [ "$status" -ne 0 ] && rollback
+    rm -rf "$LOCK_DIR"
+    exit "$status"
+}
+trap on_exit EXIT
+
+echo "$target" > "$FAILED_FILE"  # cleared on success; a crash mid-deploy won't retry in a loop
+
+"$SERVICE" stop >/dev/null 2>&1 || log "warning: service stop returned non-zero"
+git checkout -q --detach "$target" || die "git checkout $target failed"
+switch_venv "$candidate_env" || die "venv switch failed"
+mark=$(log_mark)
+"$SERVICE" start >/dev/null 2>&1 || die "service start failed"
+
+if ! healthy "$mark"; then
+    die "health check failed for $target"
+fi
+
+rm -f "$FAILED_FILE"
+log "deployed $target (previous $current, backup $backup)"
+exit 0

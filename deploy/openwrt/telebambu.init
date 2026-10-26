@@ -1,0 +1,20 @@
+#!/bin/sh /etc/rc.common
+# shellcheck disable=SC2034  # START/STOP/USE_PROCD are read by /etc/rc.common
+# procd service for the telebambu bot. Install as /etc/init.d/telebambu.
+# The bot runs in the foreground under /root/bin/telebambu-run; procd restarts it if it dies.
+
+START=99
+STOP=10
+USE_PROCD=1
+
+RUN_SCRIPT=/root/bin/telebambu-run
+
+start_service() {
+    procd_open_instance telebambu
+    procd_set_param command /bin/sh "$RUN_SCRIPT"
+    # Respawn: reset window 3600 s, wait 10 s between restarts, give up after 5 fast crashes.
+    procd_set_param respawn 3600 10 5
+    # main.py handles SIGTERM and shuts down cleanly; allow it time before SIGKILL.
+    procd_set_param term_timeout 30
+    procd_close_instance
+}
