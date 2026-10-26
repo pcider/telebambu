@@ -11,6 +11,7 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
 - Layer 2 progress notifications
 - Filament run-out alerts to a print's claimer and anyone added with `/notify_user`. Low filament alerts (10% or less on the spool in use) are off by default (`low_filament_alerts: false`) because they gave false alarms; while off, each match is only logged to the log chat with the printer's raw tray report so it can be debugged. The owner turns them back on with `/config set low_filament_alerts true`
 - A DM to the claimer once a finished print's bed has cooled enough to remove it (threshold by filament: PLA/TPU 35 °C, PETG 40 °C, ABS/ASA/PA 50 °C, PC 60 °C, others 40 °C; gives up after 2 hours or when a new print starts; table in `printers/monitor.py`)
+- `/queue` reminders: a DM when a busy printer becomes free
 - Persistent status message showing all printer states
 - Configurable notification preferences (chat or DM)
 - Opt-in anonymous prints: claimers can hide their name from other users (`/anonymous`)
@@ -97,8 +98,8 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    is logged without its values (`/printer add [redacted]`), as they hold access codes and serials.
 
    `disabled_commands` turns individual commands off: set `print`, `speed`, `skip`, `staff`,
-   `forcereclaim`, `restart`, `restartall`, `home`, `beep`, `reportbug`, `suggestfeature`, `anonymous` or
-   `ruined_report` (the "Report ruined print" button) to `true`. Disabled commands are hidden from
+   `forcereclaim`, `restart`, `restartall`, `home`, `beep`, `reportbug`, `suggestfeature`, `anonymous`,
+   `queue` (also `/unqueue`) or `ruined_report` (the "Report ruined print" button) to `true`. Disabled commands are hidden from
    `/help` and the command menu and reply that they are disabled. `staff: true` also leaves the
    owner as the only role: admins and mods are treated as ordinary users, but their roles stay in
    `data.json` and come back when `staff` is set to `false` again. `anonymous: true` only stops
@@ -196,6 +197,7 @@ sudo systemctl start telebambu
 - `/skip [printer]` - List the objects on the plate being printed; `/skip <printer> <object> [object ...]` stops printing those objects (read from the print's 3MF on the printer over FTP)
 - `/camera [printer]` - Fresh camera snapshot; in your DM it has a Refresh button
 - `/light [printer]` - Toggle the printer light
+- `/queue <printer>` - Get a one-time DM when the printer's current print ends (finished or failed); works on any printer, claimed or not, and doesn't reserve it. Everyone who asked is told at the same time. `/queue` alone lists your reminders, `/unqueue <printer>` cancels one (at most 10 per user, 20 per printer)
 - `/staff [list [user]]` - See the owner, admins and mods, or one user's role
 - `/beep <printer>` - Easter egg, not listed in `/help`: plays a short tune on an idle or finished printer's buzzer (once per printer every 30 seconds, logged)
 - `/reportbug <text>` / `/suggestfeature <text>` - Send a bug report or feature suggestion to the maintainers (or reply to a message with the command to send its text); up to 2000 characters, one per minute

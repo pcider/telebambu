@@ -96,6 +96,7 @@ class Storage:
         self.roles: dict[int, Role] = {}  # user_id -> Role, only staff are stored
         self.users: dict[int, KnownUser] = {}  # user_id -> last seen username/name
         self.bed_cooldowns: dict[int, BedCooldown] = {}  # printer number -> finished print waiting for the bed to cool
+        self.free_reminders: dict[int, list[int]] = {}  # printer number -> users to DM when it's free (/queue)
         # False while /staff is disabled: only the owner keeps a role. Stored roles are kept,
         # so admins and mods get theirs back when it is enabled again.
         self.roles_enabled = True
@@ -127,6 +128,8 @@ class Storage:
 
             for num, cooldown_data in data.get('bed_cooldowns', {}).items():
                 self.bed_cooldowns[int(num)] = _from_dict(BedCooldown, cooldown_data)
+            for num, user_ids in data.get('free_reminders', {}).items():
+                self.free_reminders[int(num)] = [int(uid) for uid in user_ids]
         except Exception as e:
             print(f'Failed to load data: {e}')
 
@@ -139,6 +142,7 @@ class Storage:
             'roles': {str(uid): role.name for uid, role in self.roles.items()},
             'users': {str(uid): asdict(u) for uid, u in self.users.items()},
             'bed_cooldowns': {str(num): asdict(c) for num, c in self.bed_cooldowns.items()},
+            'free_reminders': {str(num): uids for num, uids in self.free_reminders.items()},
         }
         # Write to a temp file then rename, so a crash mid-write can't corrupt data.json
         tmp_file = DATA_FILE + '.tmp'
@@ -342,6 +346,38 @@ class Storage:
     def end_bed_cooldown(self, printer_num: int):
         if self.bed_cooldowns.pop(printer_num, None):
             self._save()
+
+    # --- "Printer is free" reminders (/queue) ---
+
+    def add_free_reminder(self, printer_num: int, user_id: int) -> bool:
+        """Remember to DM a user when a printer's print ends. False if they already asked."""
+        user_ids = self.free_reminders.setdefault(printer_num, [])
+        if user_id in user_ids:
+            return False
+        user_ids.append(user_id)
+        self._save()
+        return True
+
+    def remove_free_reminder(self, printer_num: int, user_id: int) -> bool:
+        user_ids = self.free_reminders.get(printer_num, [])
+        if user_id not in user_ids:
+            return False
+        user_ids.remove(user_id)
+        if not user_ids:
+            del self.free_reminders[printer_num]
+        self._save()
+        return True
+
+    def free_reminders_for(self, user_id: int) -> list[int]:
+        """Printer numbers a user asked to be told about, in ascending order."""
+        return sorted(num for num, uids in self.free_reminders.items() if user_id in uids)
+
+    def pop_free_reminders(self, printer_num: int) -> list[int]:
+        """Users waiting for a printer, forgetting them so each is only told once."""
+        user_ids = self.free_reminders.pop(printer_num, [])
+        if user_ids:
+            self._save()
+        return user_ids
 
     # --- Users & roles ---
 

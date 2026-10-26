@@ -26,6 +26,8 @@ COMMANDS = (
     CommandDefinition("skip", "Skip objects on the plate"),
     CommandDefinition("camera", "View printer camera"),
     CommandDefinition("light", "Toggle printer light"),
+    CommandDefinition("queue", "Get a DM when a printer is free"),
+    CommandDefinition("unqueue", "Cancel a /queue reminder"),
     CommandDefinition("staff", "See the owner, admins and mods"),
     CommandDefinition("reportbug", "Report a bug to the maintainers"),
     CommandDefinition("suggestfeature", "Suggest a feature to the maintainers"),

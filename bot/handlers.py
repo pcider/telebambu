@@ -21,7 +21,7 @@ from printers import files
 from . import ui
 from .messages import MessageService
 from .telegram_bot import get_bot_context, parse_chat_id, set_command_menu
-from settings import DISABLEABLE_COMMANDS, PrinterConfig, Settings
+from settings import DISABLEABLE_COMMANDS, LINKED_COMMANDS, PrinterConfig, Settings
 
 NOTIFY_USAGE = "Usage: /notify [printer] <layer> or /notify [printer] <percent>%"
 NOTIFY_EVERY_USAGE = "Usage: /notify_every [printer] layers <number>, time <minutes>, percent <number>, or off"
@@ -208,6 +208,11 @@ class _RuinedQuestion:
     chat_id: int | None = None
     message_id: int | None = None
     timeout: asyncio.Task | None = None
+QUEUE_USAGE = "Usage: /queue <printer> to get a DM when its print ends, /queue to list, /unqueue <printer> to cancel"
+# States in which a printer has no print underway, so /queue has nothing to wait for
+FREE_STATES = (GcodeState.IDLE, GcodeState.FINISH, GcodeState.FAILED)
+MAX_QUEUE_PER_PRINTER = 20
+MAX_QUEUE_PER_USER = 10
 
 
 # Buttons sent before printers were 1-based, e.g. ``claim_0`` or ``dm_pref_0_chat``
@@ -310,6 +315,8 @@ class BotHandlers:
             "home": self.cmd_home,
             "beep": self.cmd_beep,
             "print": self.cmd_print,
+            "queue": self.cmd_queue,
+            "unqueue": self.cmd_unqueue,
             "staff": self.cmd_staff,
             "reportbug": self.cmd_reportbug,
             "suggestfeature": self.cmd_suggestfeature,
@@ -317,7 +324,7 @@ class BotHandlers:
             "printer": self.cmd_printer,
         }
         for name, callback in commands.items():
-            if name in DISABLEABLE_COMMANDS:
+            if name in DISABLEABLE_COMMANDS or name in LINKED_COMMANDS:
                 callback = self._unless_disabled(name, callback)
             app.add_handler(CommandHandler(name, callback))
         # Commands in a document's caption don't reach CommandHandler
@@ -565,6 +572,11 @@ class BotHandlers:
         arg = context.args[0] if context.args else ""
         # Opening the DM lets the bot message them again after a refused DM
         self.ms.mark_dm_reachable(user.id)
+
+        queue = re.fullmatch(r"queue-(\d+)", arg)
+        if queue and not self.settings.is_disabled("queue"):
+            await self._queue(update, context, int(queue[1]))
+            return
 
         match = re.fullmatch(r"claim([-_])(\d+)", arg)
         if not match:
@@ -1150,6 +1162,69 @@ class BotHandlers:
         # _unclaim's reply is worded for the claimer; keep its warning if the main chat wasn't updated
         await reply(f"Unclaimed Printer {printer_num} from {old_public}."
                     if unclaimed.startswith("You have") else unclaimed)
+
+    async def cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """One-shot DM when a printer's current print ends. Not a booking: everyone asking is told at once."""
+        reply = update.effective_message.reply_text
+        args = context.args
+        if not args:
+            waiting = self.storage.free_reminders_for(update.effective_user.id)
+            if waiting:
+                await reply(f"I'll message you when these printers are free: {', '.join(map(str, waiting))}. "
+                            f"Cancel with /unqueue <printer>.")
+            else:
+                await reply(f"You have no /queue reminders.\n{QUEUE_USAGE}")
+            return
+        if len(args) != 1 or not args[0].isdigit():
+            await reply(QUEUE_USAGE)
+            return
+        await self._queue(update, context, int(args[0]))
+
+    async def _queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE, printer_num: int):
+        reply = update.effective_message.reply_text
+        user_id = update.effective_user.id
+        if printer_num not in self.pm:
+            await reply(f"Invalid printer number. Use {self.pm.numbers_text()}")
+            return
+        # An offline printer's state is unknown, so the reminder is kept for when it reports again
+        snap = self.pm.snapshot(printer_num)
+        if snap and snap.state in FREE_STATES:
+            await reply(f"Printer {printer_num} is free now.")
+            return
+        if printer_num in self.storage.free_reminders_for(user_id):
+            await reply(f"I'll already message you when Printer {printer_num}'s current print ends.")
+            return
+        if len(self.storage.free_reminders_for(user_id)) >= MAX_QUEUE_PER_USER:
+            await reply(f"You can have at most {MAX_QUEUE_PER_USER} /queue reminders. Cancel one with /unqueue <printer>.")
+            return
+        if len(self.storage.free_reminders.get(printer_num, ())) >= MAX_QUEUE_PER_PRINTER:
+            await reply(f"Too many people are already waiting for Printer {printer_num}.")
+            return
+
+        text = f"I'll message you when Printer {printer_num}'s current print ends."
+        if update.effective_message.chat.type != "private":
+            # The reminder is a DM, so check the bot can DM them before agreeing to it
+            try:
+                await context.bot.send_message(chat_id=user_id, text=text)
+            except Exception:
+                await reply("I can't DM you yet. Start a conversation with the bot to get the reminder:",
+                            reply_markup=ui.queue_dm_keyboard(context.bot.username, printer_num))
+                return
+            text = f"{text} (sent you a DM)"
+        self.storage.add_free_reminder(printer_num, user_id)
+        await reply(text)
+
+    async def cmd_unqueue(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        reply = update.effective_message.reply_text
+        args = context.args
+        if len(args) != 1 or not args[0].isdigit():
+            await reply("Usage: /unqueue <printer>")
+            return
+        printer_num = int(args[0])
+        if self.storage.remove_free_reminder(printer_num, update.effective_user.id):
+            await reply(f"Cancelled your reminder for Printer {printer_num}.")
+        else:
+            await reply(f"You don't have a reminder for Printer {printer_num}.")
 
     async def cmd_unclaim(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Unclaim the print and revert the main chat message."""

@@ -47,6 +47,7 @@ disabled_commands:
   suggestfeature: false
   anonymous: false  # true stops users changing it; names already hidden stay hidden
   ruined_report: false
+  queue: false       # also turns off /unqueue
 
 # Printers by number. Admins can manage these with /printer.
 printers:
