@@ -9,8 +9,9 @@ from telegram.constants import MessageLimit, ParseMode
 from telegram.error import BadRequest, Forbidden
 
 from data import Storage
-from data.storage import PrintSession
+from data.storage import BedCooldown, PrintSession
 from errors import lookup_error
+from printers.manager import format_duration
 from . import ui
 from .telegram_bot import BotContext
 
@@ -26,6 +27,16 @@ def _is_cancel(error_code, reason: str) -> bool:
     return not error_code or reason == "Printing was cancelled."
 
 
+def _ended_details(session: PrintSession | None) -> str:
+    """The file, claimer and duration of an ended print, for its log chat line."""
+    file_name = session.file_name if session else None
+    claimer = f"{session.claimed_username} ({session.claimed_by})" if session and session.claimed_by else "nobody"
+    details = f"'{file_name or 'unknown'}', claimed by {claimer}"
+    if session and session.started_at:
+        details += f", took {format_duration(round((time.time() - session.started_at) / 60))}"
+    return details
+
+
 class MessageService:
     def __init__(self, bot: Bot, context: BotContext, storage: Storage):
         self.bot = bot
@@ -37,6 +48,8 @@ class MessageService:
         self._background_tasks: set[asyncio.Task] = set()
         # Claimers whose DM Telegram refused; their notifications go to the main chat until they /start
         self._dm_unreachable: set[int] = set()
+        # Whether main chat messages about claimed prints get a "Report ruined print" button
+        self.ruined_button = True
 
     # --- Low-level helpers ---
 
@@ -77,7 +90,7 @@ class MessageService:
                 print(f'DM to {user_id} refused, using the main chat until they /start the bot: {e}')
                 self._dm_unreachable.add(user_id)
                 # Don't forward DM-only camera/unclaim controls into the shared chat.
-                name = session.claimed_username or f'user {user_id}'
+                name = ui.public_claimer_name(session)
                 note = f'For {name}: DM unavailable. Open the bot and send /start, or unblock it.'
                 if not group_fallback:
                     return await self._send_main(note)
@@ -108,18 +121,33 @@ class MessageService:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
+    def delete_later(self, messages: list[tuple[int, int]], delay: float):
+        """Delete (chat_id, message_id) pairs after a delay. Pending deletes are kept in memory
+        only, so a restart drops them and those messages stay."""
+        async def _delete_later():
+            await asyncio.sleep(delay)
+            for chat_id, msg_id in messages:
+                await self._delete(chat_id, msg_id)
+
+        self._spawn(_delete_later())
+
     # --- Print lifecycle ---
 
     async def send_print_started(self, printer_num: int, print_time: str, total_layers: int = 0,
                                  file_name: str | None = None, catchup: bool = False,
                                  names: tuple[str, str] = ('', '')) -> int:
         await self._delete_started_message(self.storage.get_print(printer_num))
+        if not catchup:  # The startup catch-up logs its own line
+            layers = f", {total_layers} layers" if total_layers else ""
+            await self.log_event(f"Printer {printer_num} started printing '{file_name or 'unknown'}' "
+                                 f"(est. {print_time}{layers}).")
 
         # Build the text from a provisional session so it matches later edits (unclaim etc.)
         draft = PrintSession(message_id=0, chat_id=self.ctx.chat_id, printer_num=printer_num,
                              print_time=print_time, total_layers=total_layers, file_name=file_name,
                              catchup=catchup)
-        msg = await self._send_main(ui.started_text(printer_num, draft), reply_markup=ui.claim_keyboard(printer_num))
+        msg = await self._send_main(ui.started_text(printer_num, draft),
+                                    reply_markup=ui.claim_keyboard(self.bot.username, printer_num))
 
         subtask, gcode_file = names
         self.storage.start_print(printer_num, msg.message_id, self.ctx.chat_id, print_time, total_layers, file_name,
@@ -133,7 +161,7 @@ class MessageService:
         # A print that ran to the end finished, even if a /stop_at stop was sent and didn't take
         message = f"Printer {printer_num} has finished printing."
         if session and session.claimed_by:
-            message += f" ({session.claimed_username})"
+            message += f" ({ui.public_claimer_name(session)})"
         if catchup:
             message = ui.CATCHUP_TAG + message
 
@@ -146,6 +174,8 @@ class MessageService:
             # Still end the session, or a later startup catch-up would announce the finish again
             print(f'Failed to send finish notification for Printer {printer_num}: {e}')
         await self._notify_watchers(session, message, image)
+        if not catchup:
+            await self.log_event(f"Printer {printer_num} finished printing ({_ended_details(session)}).")
 
         self.storage.end_print(printer_num)
 
@@ -163,6 +193,14 @@ class MessageService:
         else:
             # Includes a /stop_at stop that didn't take, followed by a real failure
             message = f"Printer {printer_num} failed!\n{reason}"
+        if not catchup:
+            if session and session.stopped_at_layer and _is_cancel(error_code, reason):
+                outcome = f"was stopped at layer {session.stopped_at_layer} (/stop_at)"
+            elif _is_cancel(error_code, reason):
+                outcome = "was cancelled"
+            else:
+                outcome = f"failed: {reason} (code: {error_code})"
+            await self.log_event(f"Printer {printer_num} {outcome} ({_ended_details(session)}).")
         if catchup:
             message = ui.CATCHUP_TAG + message
         targets = []  # (chat_id, thread_id, label)
@@ -190,7 +228,10 @@ class MessageService:
                 if label == 'claimer' and thread_id is None and session.dm_preference == 'dm':
                     msg = await self._send_claimer_dm(session, message, image)
                 else:
-                    msg = await self._send(chat_id, message, image, thread_id)
+                    # In the main chat, anyone who sees it go wrong can tell the claimer more
+                    keyboard = (ui.with_ruined_button(printer_num, session.claimed_by)
+                                if label == 'claimer' and self.ruined_button else None)
+                    msg = await self._send(chat_id, message, image, thread_id, keyboard)
                 if msg:
                     sent_messages.append((msg.chat_id, msg.message_id))
             except Exception as e:
@@ -206,6 +247,16 @@ class MessageService:
                 await self._delete(chat_id, msg_id)
 
         self._spawn(_delete_later())
+
+    async def send_printer_free(self, printer_num: int, failed: bool = False):
+        """DM everyone who asked with /queue that the printer is free, then forget them."""
+        text = f"Printer {printer_num} is free now (print {'failed' if failed else 'finished'})."
+        for user_id in self.storage.pop_free_reminders(printer_num):
+            try:
+                await self._send(user_id, text)
+            except Exception as e:
+                await self.log_message(f'Could not send Printer {printer_num} /queue reminder to '
+                                       f'{self.storage.display_name(user_id)}: {e}')
 
     # --- Claimer notifications (sent to the claimer's and watchers' DMs) ---
 
@@ -229,6 +280,11 @@ class MessageService:
             except Exception as e:
                 print(f'Failed to notify claimer of Printer {printer_num}: {e}')
             await self._notify_watchers(session, message, image)
+
+    async def send_ruined_report(self, session: PrintSession, message: str):
+        """Tell a claimer their print is ruined, in the main chat if their DM is refused.
+        The session may already have ended (reports on failure messages)."""
+        return await self._send_claimer_dm(session, message)
 
     async def send_layer2_notification(self, printer_num: int, image: bytes | None = None):
         await self._notify_claimer(
@@ -267,7 +323,27 @@ class MessageService:
                                    group_fallback=False)
         self.storage.mark_notify_every_sent(printer_num, trigger_value)
 
+    async def send_bed_cooldown_notification(self, cooldown: BedCooldown, bed_temp: float):
+        """Tell a finished print's claimer the bed is cool enough to take the print off.
+        The session has already ended, so a stand-in carries the claimer for the DM fallback."""
+        session = PrintSession(message_id=0, chat_id=self.ctx.chat_id, printer_num=cooldown.printer_num,
+                               claimed_by=cooldown.user_id, claimed_username=cooldown.username,
+                               anonymous=cooldown.anonymous)
+        message = (f"Printer {cooldown.printer_num}'s bed has cooled to {bed_temp:.0f} °C ({cooldown.material}) "
+                   f"— your print should come off easily now.")
+        try:
+            await self._send_claimer_dm(session, message)
+        except Exception as e:
+            print(f'Failed to send bed cooldown notification for Printer {cooldown.printer_num}: {e}')
+
     # --- Log chat ---
+
+    async def log_event(self, message: str):
+        """Log a print or claim event. A failed log never stops the flow around it."""
+        try:
+            await self.log_message(message)
+        except Exception as e:
+            print(f'Failed to log event: {e}')
 
     async def log_message(self, message: str, image: bytes | None = None, stdout_only: bool = False):
         print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {message}')

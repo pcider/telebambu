@@ -21,7 +21,9 @@ class PrintSession:
     dm_preference: str = "chat"  # "chat" or "dm"
     layer2_notify: bool = True
     layer2_notified: bool = False
+    cooldown_notify: bool = True  # tell the claimer when the bed has cooled after the print finishes
     print_time: Optional[str] = None
+    started_at: Optional[float] = None  # when the bot saw the print start, for its duration in the log chat
     file_name: Optional[str] = None
     # Both names the printer reports, so a restart can tell whether it is still the same print
     subtask_name: Optional[str] = None
@@ -40,6 +42,7 @@ class PrintSession:
     stopped_at_layer: Optional[int] = None  # set when the bot stopped the print on request
     low_filament_alerted: list[int] = field(default_factory=list)  # tray ids already reported as low
     catchup: bool = False  # announced at startup rather than when it started
+    anonymous: bool = False  # hide the claimer's name outside the log chat (from their preferences)
 
 
 @dataclass
@@ -53,6 +56,19 @@ class KnownUser:
 class UserPreferences:
     default_dm_preference: str = "chat"
     layer2_notify: bool = True
+    anonymous: bool = False
+    cooldown_notify: bool = True
+
+
+@dataclass
+class BedCooldown:
+    """A finished print whose claimer is told once the bed is cool enough to take it off."""
+    printer_num: int
+    user_id: int
+    username: Optional[str] = None
+    material: str = "unknown"  # filament type the print used, which sets the removal temperature
+    finished_at: float = 0.0
+    anonymous: bool = False  # the claimer chose /anonymous, so a main chat fallback hides their name
 
 
 def _from_dict(cls, data: dict):
@@ -79,6 +95,8 @@ class Storage:
         self.status_message_id: Optional[int] = None
         self.roles: dict[int, Role] = {}  # user_id -> Role, only staff are stored
         self.users: dict[int, KnownUser] = {}  # user_id -> last seen username/name
+        self.bed_cooldowns: dict[int, BedCooldown] = {}  # printer number -> finished print waiting for the bed to cool
+        self.free_reminders: dict[int, list[int]] = {}  # printer number -> users to DM when it's free (/queue)
         # False while /staff is disabled: only the owner keeps a role. Stored roles are kept,
         # so admins and mods get theirs back when it is enabled again.
         self.roles_enabled = True
@@ -107,6 +125,11 @@ class Storage:
 
             for user_id, user_data in data.get('users', {}).items():
                 self.users[int(user_id)] = _from_dict(KnownUser, user_data)
+
+            for num, cooldown_data in data.get('bed_cooldowns', {}).items():
+                self.bed_cooldowns[int(num)] = _from_dict(BedCooldown, cooldown_data)
+            for num, user_ids in data.get('free_reminders', {}).items():
+                self.free_reminders[int(num)] = [int(uid) for uid in user_ids]
         except Exception as e:
             print(f'Failed to load data: {e}')
 
@@ -118,6 +141,8 @@ class Storage:
             'status_message_id': self.status_message_id,
             'roles': {str(uid): role.name for uid, role in self.roles.items()},
             'users': {str(uid): asdict(u) for uid, u in self.users.items()},
+            'bed_cooldowns': {str(num): asdict(c) for num, c in self.bed_cooldowns.items()},
+            'free_reminders': {str(num): uids for num, uids in self.free_reminders.items()},
         }
         # Write to a temp file then rename, so a crash mid-write can't corrupt data.json
         tmp_file = DATA_FILE + '.tmp'
@@ -147,6 +172,8 @@ class Storage:
             chat_id=chat_id,
             printer_num=printer_num,
             print_time=print_time,
+            # Unknown for prints found already running at startup
+            started_at=None if catchup else time.time(),
             total_layers=total_layers,
             file_name=file_name,
             subtask_name=subtask_name,
@@ -154,6 +181,8 @@ class Storage:
             catchup=catchup,
         )
         self.active_prints[printer_num] = session
+        # A new print means the last one was taken off, so stop waiting for the bed to cool
+        self.bed_cooldowns.pop(printer_num, None)
         self._save()
         return session
 
@@ -178,7 +207,8 @@ class Storage:
         # Apply user's default preferences if they exist
         prefs = self.user_preferences.get(user_id)
         if prefs:
-            changes.update(dm_preference=prefs.default_dm_preference, layer2_notify=prefs.layer2_notify)
+            changes.update(dm_preference=prefs.default_dm_preference, layer2_notify=prefs.layer2_notify,
+                           anonymous=prefs.anonymous, cooldown_notify=prefs.cooldown_notify)
         return self._update(printer_num, **changes)
 
     def unclaim_print(self, printer_num: int) -> Optional[PrintSession]:
@@ -191,6 +221,7 @@ class Storage:
             chat_id=session.chat_id,
             printer_num=printer_num,
             print_time=session.print_time,
+            started_at=session.started_at,
             total_layers=session.total_layers,
             file_name=session.file_name,
             subtask_name=session.subtask_name,
@@ -230,6 +261,24 @@ class Storage:
         if session and session.claimed_by:
             self._user_prefs(session.claimed_by).layer2_notify = enabled
         self._update(printer_num, layer2_notify=enabled)
+
+    def is_anonymous(self, user_id: int) -> bool:
+        prefs = self.user_preferences.get(user_id)
+        return bool(prefs and prefs.anonymous)
+
+    def set_anonymous(self, user_id: int, enabled: bool) -> list[int]:
+        """Save a user's anonymity and apply it to their current claims, returning those printers."""
+        self._user_prefs(user_id).anonymous = enabled
+        claimed = self.claimed_printers(user_id)
+        for num in claimed:
+            self.active_prints[num].anonymous = enabled
+        self._save()
+        return claimed
+    def set_cooldown_notify(self, printer_num: int, enabled: bool):
+        session = self.active_prints.get(printer_num)
+        if session and session.claimed_by:
+            self._user_prefs(session.claimed_by).cooldown_notify = enabled
+        self._update(printer_num, cooldown_notify=enabled)
 
     # --- Notifications ---
 
@@ -282,6 +331,53 @@ class Storage:
         if value is not None:
             changes['notify_every_last_value'] = value
         self._update(printer_num, **changes)
+
+    # --- Bed cooldown ---
+
+    def start_bed_cooldown(self, printer_num: int, user_id: int, username: Optional[str], material: str,
+                           anonymous: bool = False):
+        self.bed_cooldowns[printer_num] = BedCooldown(printer_num, user_id, username, material, time.time(),
+                                                      anonymous)
+        self._save()
+
+    def get_bed_cooldown(self, printer_num: int) -> Optional[BedCooldown]:
+        return self.bed_cooldowns.get(printer_num)
+
+    def end_bed_cooldown(self, printer_num: int):
+        if self.bed_cooldowns.pop(printer_num, None):
+            self._save()
+
+    # --- "Printer is free" reminders (/queue) ---
+
+    def add_free_reminder(self, printer_num: int, user_id: int) -> bool:
+        """Remember to DM a user when a printer's print ends. False if they already asked."""
+        user_ids = self.free_reminders.setdefault(printer_num, [])
+        if user_id in user_ids:
+            return False
+        user_ids.append(user_id)
+        self._save()
+        return True
+
+    def remove_free_reminder(self, printer_num: int, user_id: int) -> bool:
+        user_ids = self.free_reminders.get(printer_num, [])
+        if user_id not in user_ids:
+            return False
+        user_ids.remove(user_id)
+        if not user_ids:
+            del self.free_reminders[printer_num]
+        self._save()
+        return True
+
+    def free_reminders_for(self, user_id: int) -> list[int]:
+        """Printer numbers a user asked to be told about, in ascending order."""
+        return sorted(num for num, uids in self.free_reminders.items() if user_id in uids)
+
+    def pop_free_reminders(self, printer_num: int) -> list[int]:
+        """Users waiting for a printer, forgetting them so each is only told once."""
+        user_ids = self.free_reminders.pop(printer_num, [])
+        if user_ids:
+            self._save()
+        return user_ids
 
     # --- Users & roles ---
 

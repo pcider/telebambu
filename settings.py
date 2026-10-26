@@ -17,15 +17,22 @@ HEADER = """\
 # through /config or /printer, so comments added here are not kept.
 #
 # Chat targets are 'chat_id' or 'chat_id/thread_id' for forum topics.
-# log_chat_id: null disables the log chat. stats_log_interval: null disables
-# the periodic update timing report. owner_id seeds the owner role on first
+# log_chat_id: null disables the log chat. feedback_chat_id: null sends
+# /reportbug and /suggestfeature to the log chat. stats_log_interval: null disables
+# the periodic update timing report. latency_warn_seconds: null disables the
+# stale printer / slow update warnings. info_reply_ttl: seconds before replies to
+# informational commands in groups are deleted, or null to keep them. owner_id seeds the owner role on first
 # run; after that roles live in data.json and change through /staff.
 """
 
 
-# Commands that config.yml can turn off one by one. A disabled /staff also leaves the owner
-# as the only role: admins and mods act as users until it is turned back on.
-DISABLEABLE_COMMANDS = ('print', 'upload', 'speed', 'skip', 'staff', 'forcereclaim', 'restart', 'restartall', 'home')
+# Commands that config.yml can turn off one by one ('ruined_report' is the "Report ruined print"
+# button, not a command). A disabled /staff also leaves the owner as the only role: admins and
+# mods act as users until it is turned back on.
+DISABLEABLE_COMMANDS = ('print', 'upload', 'speed', 'skip', 'staff', 'forcereclaim', 'restart', 'restartall', 'home',
+                        'beep', 'reportbug', 'suggestfeature', 'anonymous', 'ruined_report', 'queue')
+# Commands turned off by another command's flag
+LINKED_COMMANDS = {'unqueue': 'queue'}
 
 
 @dataclass
@@ -43,19 +50,35 @@ class Settings:
     status_chat_id: str
     owner_id: Optional[int] = None
     log_chat_id: Optional[str] = None
+    # Where /reportbug and /suggestfeature go; null falls back to the log chat
+    feedback_chat_id: Optional[str] = None
+    # Forum topic for feedback, overriding a thread given in feedback_chat_id
+    feedback_thread_id: Optional[int] = None
     update_interval: float = 5
     stats_log_interval: Optional[float] = 60 * 60
+    latency_warn_seconds: Optional[float] = 10
     auto_restart_printers: bool = True
+    # Off while the low-filament check gives false alarms: matches are only logged for debugging
+    low_filament_alerts: bool = False
+    # Post every command and button press to the log chat
+    log_commands: bool = False
+    # Seconds a "Report ruined print" question waits for the presser's reply before it is deleted
+    ruined_report_timeout: float = 10
+    # Seconds before group replies to informational commands (and the commands) are deleted; None keeps them
+    info_reply_ttl: Optional[float] = 60
+    # Commands only work in DMs and in the status chat, log chat and command_chats (never implicitly the main chat)
+    dm_only_commands: bool = True
+    command_chats: list[str] = field(default_factory=list)
     # One flag per command in DISABLEABLE_COMMANDS; true turns that command off
     disabled_commands: dict[str, bool] = field(default_factory=lambda: dict.fromkeys(DISABLEABLE_COMMANDS, False))
     printers: dict[int, PrinterConfig] = field(default_factory=dict)
     path: str = field(default=CONFIG_FILE, repr=False, compare=False)
 
     def is_disabled(self, command: str) -> bool:
-        return bool(self.disabled_commands.get(command))
+        return bool(self.disabled_commands.get(LINKED_COMMANDS.get(command, command)))
 
     def disabled(self) -> frozenset[str]:
-        return frozenset(command for command in DISABLEABLE_COMMANDS if self.is_disabled(command))
+        return frozenset(command for command in (*DISABLEABLE_COMMANDS, *LINKED_COMMANDS) if self.is_disabled(command))
 
     def save(self):
         data = asdict(self)
@@ -69,7 +92,9 @@ class Settings:
 
 
 # Settings that may be left out of config.yml (or config.py, in upper case) to use the default
-OPTIONAL_KEYS = ('update_interval', 'stats_log_interval', 'auto_restart_printers')
+OPTIONAL_KEYS = ('update_interval', 'stats_log_interval', 'latency_warn_seconds', 'auto_restart_printers',
+                 'low_filament_alerts', 'log_commands', 'ruined_report_timeout',
+                 'info_reply_ttl', 'dm_only_commands')
 
 
 def _chat(value) -> Optional[str]:
@@ -98,7 +123,10 @@ def _from_dict(data: dict, path: str) -> Settings:
         status_chat_id=_chat(data['status_chat_id']),
         owner_id=int(owner_id) if owner_id else None,
         log_chat_id=_chat(data.get('log_chat_id')),
+        feedback_chat_id=_chat(data.get('feedback_chat_id')),
+        feedback_thread_id=int(data['feedback_thread_id']) if data.get('feedback_thread_id') else None,
         disabled_commands=_disabled_commands(data),
+        command_chats=[str(chat) for chat in data.get('command_chats') or []],
         printers=printers,
         path=path,
         # Only keys that are set, so missing ones fall back to the Settings defaults

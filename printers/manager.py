@@ -31,6 +31,16 @@ EXTERNAL_SPOOL_TRAY = 254
 NO_TRAY = 255
 # States where the printer is not in use
 IDLE_STATES = (GcodeState.IDLE, GcodeState.FINISH, GcodeState.UNKNOWN)
+# A short rising three-note chirp for /beep, in the M1006 buzzer format Bambu's start G-code uses
+# (S1 starts the buzzer, each A..N line plays a note, W ends it). Not yet checked on a real
+# printer; if it stays silent, some firmware accepts `M300 S<freq> P<ms>` instead.
+BEEP_GCODE = [
+    'M1006 S1',
+    'M1006 A0 B10 L100 C37 D10 M60 E37 F10 N60',
+    'M1006 A0 B10 L100 C41 D10 M60 E41 F10 N60',
+    'M1006 A0 B10 L100 C44 D10 M60 E44 F10 N60',
+    'M1006 W',
+]
 
 
 class _CameraRetryNoiseFilter(logging.Filter):
@@ -140,6 +150,7 @@ class FilamentTray:
     color: str
     remain: int  # percent left, or -1 when the printer can't tell (e.g. non-Bambu spools)
     active: bool = False
+    raw: dict = field(default_factory=dict, repr=False)  # the printer's report, for debugging
 
     def describe(self) -> str:
         text = f"{self.label}: {self.material or 'empty'}"
@@ -159,6 +170,7 @@ def _tray(tray_id: int, label: str, raw: dict, active_id: int) -> FilamentTray:
         color=f'#{color[:6]}' if len(color) >= 6 else '',
         remain=to_int(raw.get('remain'), -1),
         active=tray_id == active_id,
+        raw=raw,
     )
 
 
@@ -179,6 +191,15 @@ def parse_filament(print_data: dict) -> list[FilamentTray]:
     return trays
 
 
+def _track_messages(slot: 'PrinterSlot'):
+    """Record when each MQTT message arrives. bambulabs_api calls on_message_handler from
+    its MQTT thread for every message; the getters only read cached data, so this is the
+    only way to tell fresh data from stale."""
+    def on_message(*_):
+        slot.last_message_at = time.monotonic()
+    slot.printer.mqtt_client.on_message_handler = on_message
+
+
 @dataclass
 class PrinterSlot:
     """A configured printer and the state tracked for it between polls."""
@@ -191,6 +212,8 @@ class PrinterSlot:
     prev_layer: int = 0
     last_paused_time: float = 0.0
     connected_at: float = 0.0
+    # time.monotonic() of the last MQTT message from the printer (or of the last connect), set from the MQTT thread
+    last_message_at: float = 0.0
     camera_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Objects of the current print, keyed by its file so a new print re-reads them
     objects_cache: tuple[str, list[files.PrintObject]] | None = None
@@ -235,8 +258,10 @@ class PrinterManager:
             # Keep the Printer object even if the first connect fails, so
             # reconnect_if_needed() can keep retrying it.
             slot.printer = bl.Printer(slot.ip, slot.access_code, slot.serial)
+            _track_messages(slot)
             slot.printer.connect()
             slot.connected_at = time.time()
+            slot.last_message_at = time.monotonic()
         except Exception as e:
             await log_fn(f'Failed to connect to printer {num}: {e}')
 
@@ -260,6 +285,7 @@ class PrinterManager:
             try:
                 printer.connect()
                 slot.connected_at = time.time()
+                slot.last_message_at = time.monotonic()
             except Exception as e:
                 if first_failure:
                     print(f'Failed to reconnect printer {num}: {e}')
@@ -320,6 +346,7 @@ class PrinterManager:
             raise TimeoutError(f'still not done after {RESTART_TIMEOUT}s, '
                                'the camera thread is probably stuck') from None
         self.slots[num].connected_at = time.time()
+        self.slots[num].last_message_at = time.monotonic()
 
     # --- Accessors ---
 
@@ -329,6 +356,12 @@ class PrinterManager:
 
     def seconds_since_connect(self, num: int) -> float:
         return time.time() - self.slots[num].connected_at
+
+    def seconds_since_message(self, num: int) -> float | None:
+        """Seconds since the printer last sent an MQTT message, or None if it's offline."""
+        if not self.get_online_printer(num):
+            return None
+        return time.monotonic() - self.slots[num].last_message_at
 
     def get_online_printer(self, num: int) -> Printer | None:
         """The printer if it's connected and has reported state, else None."""
@@ -521,6 +554,14 @@ class PrinterManager:
             f'Updated on: {time.strftime("%Y-%m-%d %H:%M")}\n'
             '```\n'
         )
+
+    def beep(self, num: int) -> bool:
+        """Play a short tune on the printer's buzzer."""
+        printer = self.get_online_printer(num)
+        if not printer:
+            return False
+        # bambulabs_api's G-code check doesn't know M1006
+        return bool(printer.gcode(BEEP_GCODE, gcode_check=False))
 
     # --- Light & camera ---
 

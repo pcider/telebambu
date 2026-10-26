@@ -1,31 +1,217 @@
 import asyncio
+import html
 import ipaddress
 import math
 import re
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
+from typing import Callable
 
-from telegram import Update, CallbackQuery, InputFile, InputMediaPhoto, MessageEntity
+from telegram import Update, CallbackQuery, ForceReply, InputFile, InputMediaPhoto, MessageEntity
 from telegram.constants import ParseMode
-from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
-                          TypeHandler, filters)
+from telegram.ext import (Application, ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, ContextTypes,
+                          MessageHandler, TypeHandler, filters)
 from bambulabs_api import GcodeState
 
 from data import Role, Storage, can_assign
+from data.storage import PrintSession
 from printers import EXTERNAL_SPOOL_TRAY, PrinterManager, SPEED_LEVELS
 from printers import files
 from . import ui
 from .messages import MessageService
-from .telegram_bot import get_bot_context, parse_chat_id
-from settings import DISABLEABLE_COMMANDS, PrinterConfig, Settings
+from .telegram_bot import get_bot_context, parse_chat_id, set_command_menu
+from settings import DISABLEABLE_COMMANDS, LINKED_COMMANDS, PrinterConfig, Settings
 
 NOTIFY_USAGE = "Usage: /notify [printer] <layer> or /notify [printer] <percent>%"
 NOTIFY_EVERY_USAGE = "Usage: /notify_every [printer] layers <number>, time <minutes>, percent <number>, or off"
-CONFIG_USAGE = "Usage: /config or /config set <chat_id|status_chat_id|log_chat_id|update_interval> <value>"
-# Settings the owner can change at runtime; chat targets are 'chat_id' or 'chat_id/thread_id'
-CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "update_interval")
+CONFIG_USAGE = ("Usage:\n"
+                "/config - Show settings\n"
+                "/config set <key> <value>\n"
+                "/config here <chat_id|status_chat_id|log_chat_id> - Use this chat and topic\n"
+                "/config disable <command> or /config enable <command>\n"
+                "/config allowhere|denyhere - Allow or stop commands in this group")
 MIN_UPDATE_INTERVAL = 1  # seconds
+OFF_VALUES = ("none", "off", "null")
+
+
+def _parse_chat(raw: str) -> str:
+    parse_chat_id(raw)  # raises ValueError with a message for the owner
+    return raw
+
+
+def _parse_optional_chat(raw: str) -> str | None:
+    return None if raw.lower() in OFF_VALUES else _parse_chat(raw)
+
+
+def _parse_thread(raw: str) -> int | None:
+    if raw.lower() in OFF_VALUES:
+        return None
+    if not raw.isdigit():
+        raise ValueError(f"'{raw}' is not a topic (thread) id; use a number, or none for no topic.")
+    return int(raw)
+
+
+def _seconds(value: float) -> float:
+    return int(value) if value.is_integer() else value
+
+
+def _parse_feedback_thread(raw: str) -> int | None:
+    if raw.lower() in OFF_VALUES:
+        return None
+    if not raw.isdigit():
+        raise ValueError("feedback_thread_id must be a forum topic id (a number), or 'none'.")
+    return int(raw)
+
+
+def _parse_update_interval(raw: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0
+    # nan passes a < check and makes asyncio.sleep return at once; inf is allowed (see README)
+    if math.isnan(value) or value < MIN_UPDATE_INTERVAL:
+        raise ValueError(f"update_interval must be a number of seconds, at least {MIN_UPDATE_INTERVAL}.")
+    return _seconds(value)
+
+
+def _parse_stats_log_interval(raw: str) -> float | None:
+    if raw.lower() in OFF_VALUES:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0
+    if math.isnan(value) or value <= 0:
+        raise ValueError("stats_log_interval must be a positive number of seconds, or none to turn it off.")
+    return _seconds(value)
+
+
+def _parse_latency_warn_seconds(raw: str) -> float | None:
+    if raw.lower() in OFF_VALUES:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0
+    if not 0 < value < math.inf:  # also rejects nan
+        raise ValueError("latency_warn_seconds must be a positive number of seconds, or off.")
+    return _seconds(value)
+
+
+def _parse_ruined_report_timeout(raw: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("ruined_report_timeout must be a positive number of seconds.")
+    return _seconds(value)
+
+
+def _parse_info_reply_ttl(raw: str) -> float | None:
+    if raw.lower() in OFF_VALUES:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0
+    if not _valid_ttl(value):
+        raise ValueError("info_reply_ttl must be a positive number of seconds, or off.")
+    return _seconds(value)
+
+
+def _parse_command_chats(raw: str) -> list[str]:
+    chats = [] if raw.lower() in OFF_VALUES else [chat for chat in raw.split(",") if chat]
+    if not all(re.fullmatch(r"-?\d+", chat) for chat in chats):
+        raise ValueError("command_chats must be chat ids separated by commas (e.g. -100123,-100456), or none.")
+    return chats
+
+
+def _parse_bool(raw: str, key: str) -> bool:
+    value = raw.lower()
+    if value in ("true", "on", "yes", "1"):
+        return True
+    if value in ("false", "off", "no", "0"):
+        return False
+    raise ValueError(f"{key} must be true or false.")
+
+
+def _bool(key: str) -> Callable[[str], bool]:
+    return partial(_parse_bool, key=key)
+
+
+@dataclass(frozen=True)
+class ConfigKey:
+    """A setting /config set can change. With ``target``, it's the topic (thread) id part of
+    that chat target setting instead of a Settings attribute of its own."""
+    parse: Callable[[str], object]  # raises ValueError with a message for the owner
+    target: str | None = None
+
+
+# Settings the owner can change at runtime, in /config order; chat targets are 'chat_id' or
+# 'chat_id/thread_id'. The bot token, owner_id (see /staff) and printers (see /printer) aren't here.
+CONFIG_KEYS = {
+    "chat_id": ConfigKey(_parse_chat),
+    "thread_id": ConfigKey(_parse_thread, target="chat_id"),
+    "status_chat_id": ConfigKey(_parse_chat),
+    "status_thread_id": ConfigKey(_parse_thread, target="status_chat_id"),
+    "log_chat_id": ConfigKey(_parse_optional_chat),
+    "log_thread_id": ConfigKey(_parse_thread, target="log_chat_id"),
+    # Feedback (/reportbug, /suggestfeature); feedback_thread_id is a setting of its own that
+    # overrides any topic in feedback_chat_id, unlike the *_thread_id keys above
+    "feedback_chat_id": ConfigKey(_parse_optional_chat),
+    "feedback_thread_id": ConfigKey(_parse_feedback_thread),
+    "update_interval": ConfigKey(_parse_update_interval),
+    "stats_log_interval": ConfigKey(_parse_stats_log_interval),
+    "latency_warn_seconds": ConfigKey(_parse_latency_warn_seconds),
+    "ruined_report_timeout": ConfigKey(_parse_ruined_report_timeout),
+    "info_reply_ttl": ConfigKey(_parse_info_reply_ttl),
+    # Where commands work (see gate_commands); also /config allowhere|denyhere
+    "dm_only_commands": ConfigKey(_bool("dm_only_commands")),
+    "command_chats": ConfigKey(_parse_command_chats),
+    "auto_restart_printers": ConfigKey(_bool("auto_restart_printers")),
+    "low_filament_alerts": ConfigKey(_bool("low_filament_alerts")),
+    "log_commands": ConfigKey(_bool("log_commands")),
+}
+# Keys /config here sets to the chat and topic it's sent in
+CHAT_TARGET_KEYS = ("chat_id", "status_chat_id", "log_chat_id")
+
+
+def get_config_value(settings: Settings, key: str):
+    target = CONFIG_KEYS[key].target
+    if target is None:
+        return getattr(settings, key)
+    return parse_chat_id(getattr(settings, target))[1]
+
+
+def set_config_value(settings: Settings, key: str, value):
+    """Change a config key in memory. Raises ValueError for a topic id with no chat to go with."""
+    target = CONFIG_KEYS[key].target
+    if target is None:
+        setattr(settings, key, value)
+        return
+    chat, _ = parse_chat_id(getattr(settings, target))
+    if chat is None:
+        raise ValueError(f"Set {target} before {key}.")
+    setattr(settings, target, chat if value is None else f"{chat}/{value}")
+# Read-only command uses whose group replies are deleted after info_reply_ttl, with the command.
+# Words after the name match the arguments (any case): "*" is any one argument, a final "..."
+# allows any further ones, and otherwise the argument count must match.
+INFO_COMMANDS = frozenset({
+    "help ...",
+    "info ...",
+    "camera ...",
+    "staff",
+    "staff list ...",
+    "config",
+    "printer list ...",
+    "notify_user *",  # lists the print's watchers
+    "skip",
+    "skip *",  # lists the plate's objects
+    "speed",  # shows the current speed
+    "queue",  # lists the user's /queue reminders
+})
 PRINTER_USAGE = (
     "Usage:\n"
     "/printer list\n"
@@ -35,6 +221,8 @@ PRINTER_USAGE = (
 )
 # /printer edit field names -> PrinterConfig attributes
 PRINTER_FIELDS = {"mac": "mac", "ip": "ip", "code": "access_code", "serial_no": "serial"}
+# Minimum gap between two /beep tunes on the same printer
+BEEP_COOLDOWN = 30  # seconds
 MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$")
 NOTIFY_USER_USAGE = ("Usage: /notify_user <printer> <user> [user ...] to add, "
                      "/notify_user <printer> remove <user> [user ...] to remove, or /notify_user <printer> to list")
@@ -50,6 +238,32 @@ MAX_PRINT_FILE_SIZE = 20 * 1024 * 1024
 # States in which a printer can start a new print
 READY_STATES = (GcodeState.IDLE, GcodeState.FINISH, GcodeState.FAILED)
 STAFF_USAGE = "Usage: /staff list [user] or /staff edit <owner|admin|mod|user> <user>"
+# /reportbug and /suggestfeature: command -> header of the message sent to the feedback chat
+FEEDBACK_HEADERS = {"reportbug": "🐞 Bug report", "suggestfeature": "💡 Feature suggestion"}
+MAX_FEEDBACK_LENGTH = 2000
+FEEDBACK_COOLDOWN = 60  # seconds between feedback messages from one user
+RUINED_CONFIRM_TTL = 5  # seconds before the "told the claimer" confirmation is deleted
+
+
+@dataclass
+class _RuinedQuestion:
+    """A "what's wrong with the print?" question waiting for the button presser's reply (memory only)."""
+    printer_num: int
+    claimer_id: int
+    presser_id: int
+    chat_id: int | None = None
+    message_id: int | None = None
+    timeout: asyncio.Task | None = None
+QUEUE_USAGE = "Usage: /queue <printer> to get a DM when its print ends, /queue to list, /unqueue <printer> to cancel"
+# States in which a printer has no print underway, so /queue has nothing to wait for
+FREE_STATES = (GcodeState.IDLE, GcodeState.FINISH, GcodeState.FAILED)
+MAX_QUEUE_PER_PRINTER = 20
+MAX_QUEUE_PER_USER = 10
+# A command at the start of a message or caption: /name or /name@bot
+_COMMAND_RE = re.compile(r"^/(\w+)(?:@(\w+))?(?:\s|$)")
+# Seconds between "use the DM" hints to the same user, and before the group fallback is deleted
+COMMAND_HINT_COOLDOWN = 60
+COMMAND_HINT_TTL = 10
 
 
 # Buttons sent before printers were 1-based, e.g. ``claim_0`` or ``dm_pref_0_chat``
@@ -78,6 +292,18 @@ def _mention(user) -> str:
     return f"@{user.username}" if user.username else user.full_name
 
 
+def _logged_command(text: str) -> str:
+    """A command as written to the log chat, without secrets: /printer arguments can hold
+    access codes and serial numbers, so only its subcommand is kept."""
+    command, _, rest = text.partition(" ")
+    if command.split("@", 1)[0].lower() != "/printer":
+        return text
+    args = rest.replace(",", " ").split()
+    if not args:
+        return command
+    return f"{command} {args[0]}" + (" [redacted]" if len(args) > 1 else "")
+
+
 def _replied_to(message):
     """The message this one deliberately replies to, if any.
 
@@ -94,6 +320,58 @@ def _replied_to(message):
     return reply_to
 
 
+def _is_info_command(name: str, args: list[str], message) -> bool:
+    """Whether this use of a command only shows information (see INFO_COMMANDS)."""
+    if name == "notify_user" and _replied_to(message):
+        return False  # Adds the replied-to user
+    words = [name] + [arg.lower() for arg in args]
+    for pattern in INFO_COMMANDS:
+        parts = pattern.split()
+        rest = parts[-1] == "..."
+        if rest:
+            parts.pop()
+        if len(words) < len(parts) or (not rest and len(words) != len(parts)):
+            continue
+        if all(part in ("*", word) for part, word in zip(parts, words)):
+            return True
+    return False
+
+
+def _valid_ttl(value) -> bool:
+    """info_reply_ttl must be a positive, finite number of seconds; anything else turns it off."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value < math.inf
+
+
+class _RecordingMessage:
+    """A command message whose reply_* methods also note the bot's replies in ``sent``."""
+
+    def __init__(self, message, sent: list):
+        self._message = message
+        self._sent = sent
+
+    def __getattr__(self, name):
+        attr = getattr(self._message, name)
+        if not name.startswith("reply_") or not callable(attr):
+            return attr
+
+        async def reply(*args, **kwargs):
+            result = await attr(*args, **kwargs)
+            self._sent.extend(result if isinstance(result, (list, tuple)) else [result])
+            return result
+        return reply
+
+
+class _RecordingUpdate:
+    """An update passed to a command handler so the replies it sends can be found afterwards."""
+
+    def __init__(self, update: Update, sent: list):
+        self._update = update
+        self.effective_message = _RecordingMessage(update.effective_message, sent)
+
+    def __getattr__(self, name):
+        return getattr(self._update, name)
+
+
 class BotHandlers:
     def __init__(self, storage: Storage, message_service: MessageService, printer_manager: PrinterManager,
                  settings: Settings):
@@ -101,10 +379,27 @@ class BotHandlers:
         self.ms = message_service
         self.pm = printer_manager
         self.settings = settings
+        # Printer number -> time of its last /beep
+        self._last_beep: dict[int, float] = {}
+        # user id -> time.monotonic() of their last feedback message; in memory only
+        self._last_feedback: dict[int, float] = {}
+        # Printer number -> its pending ruined print question, one per printer
+        self._ruined_questions: dict[int, _RuinedQuestion] = {}
+        # Failure notifications follow the same disable flag (read at startup, like the command menu)
+        message_service.ruined_button = not settings.is_disabled("ruined_report")
+        # When each user was last told to use the DM, for COMMAND_HINT_COOLDOWN
+        self._command_hints: dict[int, float] = {}
+        # Filled by register(); only these commands are stopped outside command chats
+        self._command_names: frozenset[str] = frozenset()
 
     def register(self, app: Application):
         # Runs before every other handler so @usernames can be resolved later
         app.add_handler(TypeHandler(Update, self.track_user), group=-1)
+        # Commands outside DMs and command chats stop here, before the user tracker and commands
+        app.add_handler(MessageHandler(filters.UpdateType.MESSAGES & (filters.TEXT | filters.CAPTION),
+                                       self.gate_commands), group=-2)
+        # Runs before the gate, in its own group, so commands the gate stops are logged too
+        app.add_handler(TypeHandler(Update, self.log_command), group=-3)
 
         commands = {
             "start": self.cmd_start,
@@ -122,20 +417,30 @@ class BotHandlers:
             "light": self.cmd_light,
             "claim": self.cmd_claim,
             "unclaim": self.cmd_unclaim,
+            "anonymous": self.cmd_anonymous,
             "forcereclaim": self.cmd_forcereclaim,
             "forceunclaim": self.cmd_forceunclaim,
             "restart": self.cmd_restart,
             "restartall": self.cmd_restartall,
             "home": self.cmd_home,
+            "beep": self.cmd_beep,
             "print": self.cmd_print,
             "upload": self.cmd_upload,
+            "queue": self.cmd_queue,
+            "unqueue": self.cmd_unqueue,
             "staff": self.cmd_staff,
+            "reportbug": self.cmd_reportbug,
+            "suggestfeature": self.cmd_suggestfeature,
             "config": self.cmd_config,
             "printer": self.cmd_printer,
         }
+        info_names = {pattern.split()[0] for pattern in INFO_COMMANDS}
+        self._command_names = frozenset(commands)
         for name, callback in commands.items():
-            if name in DISABLEABLE_COMMANDS:
+            if name in DISABLEABLE_COMMANDS or name in LINKED_COMMANDS:
                 callback = self._unless_disabled(name, callback)
+            if name in info_names:
+                callback = self._autodelete_info(name, callback)
             app.add_handler(CommandHandler(name, callback))
         # Commands in a document's caption don't reach CommandHandler
         app.add_handler(MessageHandler(filters.Document.ALL & filters.CaptionRegex(r"^/print(@\w+)?(\s|$)"),
@@ -147,12 +452,17 @@ class BotHandlers:
             _callback_pattern("claim", "claim"): self.cb_claim,
             _callback_pattern("dmpref", "dm_pref", ":(chat|dm)"): self.cb_dm_preference,
             _callback_pattern("layer2", "layer2_toggle"): self.cb_layer2_toggle,
+            r"^cooldown:\d+$": self.cb_cooldown_toggle,
             _callback_pattern("unclaim", "unclaim"): self.cb_unclaim,
+            r"^anon:\d+$": self.cb_anonymous_toggle,
             r"^cam:\d+$": self.cb_refresh_camera,
+            r"^ruined:\d+:\d+$": self.cb_report_ruined,
             r"^help$": self.cb_help,
         }
         for pattern, callback in callbacks.items():
             app.add_handler(CallbackQueryHandler(callback, pattern=pattern))
+        # Its own group, so replies still reach any other message handler
+        app.add_handler(MessageHandler(filters.REPLY & ~filters.COMMAND, self.on_ruined_reply), group=1)
 
     def _unless_disabled(self, name: str, callback):
         """Wrap a command so it refuses to run while config.yml disables it."""
@@ -163,12 +473,144 @@ class BotHandlers:
             await callback(update, context)
         return guarded
 
+    def _autodelete_info(self, name: str, callback):
+        """Wrap a command so its read-only uses (INFO_COMMANDS) in group chats have the command and
+        the bot's replies deleted after info_reply_ttl seconds. Replies in DMs are kept."""
+        async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            message = update.effective_message
+            ttl = self.settings.info_reply_ttl
+            if (not message or message.chat.type == "private" or not _valid_ttl(ttl)
+                    or not _is_info_command(name, context.args or [], message)):
+                await callback(update, context)
+                return
+            sent = []
+            try:
+                await callback(_RecordingUpdate(update, sent), context)
+            finally:
+                # Failures (e.g. no delete rights) are ignored. Pending deletes are in memory only,
+                # so a restart drops them and those messages stay.
+                targets = [(message.chat_id, message.message_id)]
+                targets += [(m.chat_id, m.message_id) for m in sent if m]
+                self.ms.delete_later(targets, ttl)
+        return wrapped
+    # --- Where commands work ---
+
+    def _command_chat_ids(self) -> set[str]:
+        """Group chats commands work in: the status and log chats, unless one is also the main
+        chat (which is only allowed through command_chats), plus command_chats."""
+        main_chat, _ = parse_chat_id(self.settings.chat_id)
+        implicit = {parse_chat_id(self.settings.status_chat_id)[0], parse_chat_id(self.settings.log_chat_id)[0]}
+        return (implicit - {main_chat, None}) | set(self.settings.command_chats)
+
+    async def gate_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Stop commands sent in groups that aren't command chats, and point the sender to the DM."""
+        message = update.effective_message
+        user = update.effective_user
+        match = _COMMAND_RE.match(message.text or message.caption or "")
+        if not match or not user or not self.settings.dm_only_commands or message.chat.type == "private":
+            return
+        command, addressee = match[1].lower(), match[2]
+        if command not in self._command_names:
+            return
+        # Commands for other bots aren't ours to stop
+        if addressee and addressee.lower() != (context.bot.username or "").lower():
+            return
+        if str(message.chat.id) in self._command_chat_ids():
+            return
+        # So the owner can whitelist a group from inside it, or point a chat target at it
+        # (/config here <key> is sent in the target chat, which is often the main chat)
+        args = [arg.lower() for arg in (message.text or "").split()[1:]]
+        if (command == "config" and (args in (["allowhere"], ["denyhere"])
+                                     or (len(args) == 2 and args[0] == "here" and args[1] in CHAT_TARGET_KEYS))
+                and self.storage.get_role(user.id) == Role.OWNER):
+            return
+
+        await self.track_user(update, context)
+        try:
+            await message.delete()
+        except Exception:
+            pass  # No delete rights
+        now = time.monotonic()
+        if now - self._command_hints.get(user.id, -COMMAND_HINT_COOLDOWN) >= COMMAND_HINT_COOLDOWN:
+            self._command_hints[user.id] = now
+            await self._send_command_hint(context, message, user, command)
+        raise ApplicationHandlerStop
+
+    async def _send_command_hint(self, context: ContextTypes.DEFAULT_TYPE, message, user, command: str):
+        """DM the user where to send the command, or say so briefly in the group if the DM fails."""
+        title = message.chat.title or "this group"
+        try:
+            await context.bot.send_message(chat_id=user.id,
+                                           text=f"Commands don't work in {title} — send /{command} here instead.")
+            return
+        except Exception:
+            pass  # They haven't started the bot
+        try:
+            hint = await context.bot.send_message(
+                chat_id=message.chat.id,
+                message_thread_id=message.message_thread_id if message.is_topic_message else None,
+                text=f"{_mention(user)}, commands only work in a DM with me. Open it and send /{command} there.",
+                reply_markup=ui.open_dm_keyboard(context.bot.username),
+            )
+        except Exception as e:
+            print(f'Could not send command hint in chat {message.chat.id}: {e}')
+            return
+
+        async def _delete_later():
+            await asyncio.sleep(COMMAND_HINT_TTL)
+            try:
+                await hint.delete()
+            except Exception:
+                pass
+        context.application.create_task(_delete_later())
+
     # --- Users & roles ---
 
     async def track_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         if user and not user.is_bot:
             self.storage.remember_user(user.id, user.username, user.full_name)
+
+    async def log_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Post commands and button presses to the log chat when log_commands is on.
+
+        Runs before the command itself, so commands that are then refused are logged too.
+        """
+        if not self.settings.log_commands:
+            return
+        try:
+            await self._log_command(update, context)
+        except Exception as e:
+            print(f"Failed to log command: {e}")
+
+    async def _log_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if update.callback_query:
+            kind, text, message = "Button", update.callback_query.data, update.callback_query.message
+        else:
+            message = update.message or update.edited_message
+            text = message and (message.text or message.caption)
+            if not text or not text.startswith("/"):
+                return
+            # Commands meant for another bot in the group
+            target = text.split(maxsplit=1)[0].partition("@")[2]
+            if target and target.lower() != (context.bot.username or "").lower():
+                return
+            kind, text = "Command", _logged_command(text)
+        if user is None or text is None:
+            return
+
+        chat = update.effective_chat
+        if chat is None:
+            where = "unknown chat"
+        elif chat.type == "private":
+            where = "DM"
+        else:
+            where = f"{chat.title} ({chat.id}"
+            if message is not None and getattr(message, "is_topic_message", False):
+                where += f", thread {message.message_thread_id}"
+            where += ")"
+        await self.ms.log_message(f"{kind}: {_mention(user)} ({user.id}) in {where}: {text}")
 
     def is_admin(self, user_id: int) -> bool:
         return self.storage.get_role(user_id) >= Role.ADMIN
@@ -267,13 +709,16 @@ class BotHandlers:
             reply_markup=ui.dm_preference_keyboard(printer_num),
         )
 
-    async def _claim(self, context: ContextTypes.DEFAULT_TYPE, user_id: int, username: str, printer_num: int) -> bool:
+    async def _claim(self, context: ContextTypes.DEFAULT_TYPE, user_id: int, username: str, printer_num: int,
+                     log: bool = True) -> bool:
         """Claim an unclaimed print for a user, DM them its settings and update the main chat message.
 
         Returns False if the DM couldn't be delivered (the user hasn't started the bot yet),
-        in which case the main chat message asks them to.
+        in which case the main chat message asks them to. ``log=False`` is for callers that log their own line.
         """
         session = self.storage.claim_print(printer_num, user_id, username)
+        if log:
+            await self.ms.log_event(f"Claim: {username} ({user_id}) claimed Printer {printer_num}.")
         text = ui.claimed_text(printer_num, session)
         reply_markup = None
         try:
@@ -281,8 +726,13 @@ class BotHandlers:
             dm_sent = True
         except Exception:
             dm_sent = False
-            text += f"\n\n{username}, please start a conversation with the bot to configure your print settings:"
+            name = ui.public_claimer_name(session)
+            text += f"\n\n{name[:1].upper() + name[1:]}, please start a conversation with the bot to configure your print settings:"
             reply_markup = ui.start_dm_keyboard(context.bot.username, printer_num)
+        if session.anonymous:
+            # The main chat doesn't show who claimed it, so keep a record in the log chat
+            await self.ms.log_message(f"{username} claimed Printer {printer_num} anonymously.")
+        reply_markup = self._claimed_keyboard(printer_num, user_id, reply_markup)
 
         try:
             await context.bot.edit_message_text(chat_id=session.chat_id, message_id=session.message_id,
@@ -291,15 +741,24 @@ class BotHandlers:
             print(f'Could not update main chat message for Printer {printer_num} claim: {e}')
         return dm_sent
 
-    async def _unclaim(self, context: ContextTypes.DEFAULT_TYPE, printer_num: int) -> str:
+    def _claimed_keyboard(self, printer_num: int, claimer_id: int, keyboard=None):
+        """A claimed print's main chat keyboard, with the "Report ruined print" button unless disabled."""
+        if self.settings.is_disabled("ruined_report"):
+            return keyboard
+        return ui.with_ruined_button(printer_num, claimer_id, keyboard)
+
+    async def _unclaim(self, context: ContextTypes.DEFAULT_TYPE, printer_num: int, log: bool = True) -> str:
         """Unclaim a print, restore the Claim button in the main chat and return a reply text."""
+        old = self.storage.get_print(printer_num)
         session = self.storage.unclaim_print(printer_num)
+        if log and old and old.claimed_by:
+            await self.ms.log_event(f"Unclaim: {old.claimed_username} ({old.claimed_by}) unclaimed Printer {printer_num}.")
         try:
             await context.bot.edit_message_text(
                 chat_id=session.chat_id,
                 message_id=session.message_id,
                 text=ui.started_text(printer_num, session),
-                reply_markup=ui.claim_keyboard(printer_num),
+                reply_markup=ui.claim_keyboard(context.bot.username, printer_num),
             )
             return f"You have unclaimed Printer {printer_num}."
         except Exception:
@@ -315,16 +774,21 @@ class BotHandlers:
     # --- Commands ---
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handles deep links from the "Start DM with bot" button."""
+        """Handles deep links from the "Claim in DM" and "Start DM with bot" buttons."""
         user = update.effective_user
         reply = update.effective_message.reply_text
         arg = context.args[0] if context.args else ""
         # Opening the DM lets the bot message them again after a refused DM
         self.ms.mark_dm_reachable(user.id)
 
+        queue = re.fullmatch(r"queue-(\d+)", arg)
+        if queue and not self.settings.is_disabled("queue"):
+            await self._queue(update, context, int(queue[1]))
+            return
+
         match = re.fullmatch(r"claim([-_])(\d+)", arg)
         if not match:
-            await reply("Welcome! Use the buttons in the main chat to claim prints.")
+            await reply("Welcome! Use the Claim in DM buttons in the main chat, or /claim <printer>, to claim prints.")
             return
 
         # "claim_N" links predate 1-based printer numbers
@@ -332,6 +796,12 @@ class BotHandlers:
         session = self.storage.get_print(printer_num)
         if not session:
             await reply(ui.SESSION_ENDED)
+            return
+        if not session.claimed_by:
+            # Claiming is an explicit step in the DM, not a side effect of opening it
+            status = html.escape(self._print_status(printer_num))
+            await reply(f"Send <code>/claim {printer_num}</code> to claim Printer {printer_num}.{status}",
+                        parse_mode=ParseMode.HTML)
             return
         if session.claimed_by != user.id:
             await reply("You are not the claimer of this print.")
@@ -345,6 +815,7 @@ class BotHandlers:
                 chat_id=session.chat_id,
                 message_id=session.message_id,
                 text=ui.claimed_text(printer_num, session),
+                reply_markup=self._claimed_keyboard(printer_num, user.id),
             )
         except Exception as e:
             print(f'Exception: could not edit main chat message {session.message_id} on /start deep link: {e}')
@@ -415,7 +886,7 @@ class BotHandlers:
             line = self.pm.status_line(num) if num in self.pm else f"{num}: REMOVED"
             extras = ui.session_extras(session)
             if num in watched:
-                extras.insert(0, f"watching {session.claimed_username}'s print")
+                extras.insert(0, f"watching {ui.public_claimer_name(session)}'s print")
             lines.append(line + (f" [{'; '.join(extras)}]" if extras else ""))
         await update.effective_message.reply_text(ui.code_block("Your prints:", lines), parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -799,7 +1270,7 @@ class BotHandlers:
             await reply(f"Failed to toggle light: {e}")
 
     async def cmd_claim(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Claim an unclaimed print without its button, e.g. when the start message is buried."""
+        """Claim an unclaimed print, usually in the DM opened by the "Claim in DM" button."""
         reply = update.effective_message.reply_text
         args = context.args
         if len(args) != 1 or not args[0].isdigit():
@@ -819,7 +1290,7 @@ class BotHandlers:
             await reply(f"You have already claimed Printer {printer_num}.")
             return
         if session.claimed_by:
-            await reply(f"Printer {printer_num} is already claimed by {session.claimed_username}.")
+            await reply(f"Printer {printer_num} is already claimed by {ui.public_claimer_name(session)}.")
             return
 
         if await self._claim(context, user.id, _mention(user), printer_num):
@@ -848,19 +1319,20 @@ class BotHandlers:
             await reply(self._unknown_user_text(token))
             return
         if session.claimed_by == new_claimer:
-            await reply(f"{session.claimed_username} already has Printer {printer_num}.")
+            await reply(f"{ui.public_claimer_name(session)} already has Printer {printer_num}.")
             return
 
         old_claimer, old_name = session.claimed_by, session.claimed_username
         new_name = self.storage.display_name(new_claimer)
         self.storage.unclaim_print(printer_num)
-        dm_sent = await self._claim(context, new_claimer, new_name, printer_num)
+        dm_sent = await self._claim(context, new_claimer, new_name, printer_num, log=False)
 
         admin_name = self.storage.display_name(update.effective_user.id)
         if old_claimer:
             try:
+                new_public = ui.public_claimer_name(self.storage.get_print(printer_num))
                 await context.bot.send_message(chat_id=old_claimer,
-                                               text=f"{admin_name} reassigned Printer {printer_num} to {new_name}.")
+                                               text=f"{admin_name} reassigned Printer {printer_num} to {new_public}.")
             except Exception:
                 pass
         await self.ms.log_message(f"Force reclaim: {admin_name} gave Printer {printer_num} "
@@ -886,7 +1358,8 @@ class BotHandlers:
             await reply(f"Printer {printer_num} isn't claimed.")
             return
         old_claimer, old_name = session.claimed_by, session.claimed_username
-        unclaimed = await self._unclaim(context, printer_num)
+        old_public = ui.public_claimer_name(session)
+        unclaimed = await self._unclaim(context, printer_num, log=False)
 
         admin_name = self.storage.display_name(update.effective_user.id)
         try:
@@ -895,8 +1368,71 @@ class BotHandlers:
             pass
         await self.ms.log_message(f"Force unclaim: {admin_name} unclaimed Printer {printer_num} from {old_name}.")
         # _unclaim's reply is worded for the claimer; keep its warning if the main chat wasn't updated
-        await reply(f"Unclaimed Printer {printer_num} from {old_name}."
+        await reply(f"Unclaimed Printer {printer_num} from {old_public}."
                     if unclaimed.startswith("You have") else unclaimed)
+
+    async def cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """One-shot DM when a printer's current print ends. Not a booking: everyone asking is told at once."""
+        reply = update.effective_message.reply_text
+        args = context.args
+        if not args:
+            waiting = self.storage.free_reminders_for(update.effective_user.id)
+            if waiting:
+                await reply(f"I'll message you when these printers are free: {', '.join(map(str, waiting))}. "
+                            f"Cancel with /unqueue <printer>.")
+            else:
+                await reply(f"You have no /queue reminders.\n{QUEUE_USAGE}")
+            return
+        if len(args) != 1 or not args[0].isdigit():
+            await reply(QUEUE_USAGE)
+            return
+        await self._queue(update, context, int(args[0]))
+
+    async def _queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE, printer_num: int):
+        reply = update.effective_message.reply_text
+        user_id = update.effective_user.id
+        if printer_num not in self.pm:
+            await reply(f"Invalid printer number. Use {self.pm.numbers_text()}")
+            return
+        # An offline printer's state is unknown, so the reminder is kept for when it reports again
+        snap = self.pm.snapshot(printer_num)
+        if snap and snap.state in FREE_STATES:
+            await reply(f"Printer {printer_num} is free now.")
+            return
+        if printer_num in self.storage.free_reminders_for(user_id):
+            await reply(f"I'll already message you when Printer {printer_num}'s current print ends.")
+            return
+        if len(self.storage.free_reminders_for(user_id)) >= MAX_QUEUE_PER_USER:
+            await reply(f"You can have at most {MAX_QUEUE_PER_USER} /queue reminders. Cancel one with /unqueue <printer>.")
+            return
+        if len(self.storage.free_reminders.get(printer_num, ())) >= MAX_QUEUE_PER_PRINTER:
+            await reply(f"Too many people are already waiting for Printer {printer_num}.")
+            return
+
+        text = f"I'll message you when Printer {printer_num}'s current print ends."
+        if update.effective_message.chat.type != "private":
+            # The reminder is a DM, so check the bot can DM them before agreeing to it
+            try:
+                await context.bot.send_message(chat_id=user_id, text=text)
+            except Exception:
+                await reply("I can't DM you yet. Start a conversation with the bot to get the reminder:",
+                            reply_markup=ui.queue_dm_keyboard(context.bot.username, printer_num))
+                return
+            text = f"{text} (sent you a DM)"
+        self.storage.add_free_reminder(printer_num, user_id)
+        await reply(text)
+
+    async def cmd_unqueue(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        reply = update.effective_message.reply_text
+        args = context.args
+        if len(args) != 1 or not args[0].isdigit():
+            await reply("Usage: /unqueue <printer>")
+            return
+        printer_num = int(args[0])
+        if self.storage.remove_free_reminder(printer_num, update.effective_user.id):
+            await reply(f"Cancelled your reminder for Printer {printer_num}.")
+        else:
+            await reply(f"You don't have a reminder for Printer {printer_num}.")
 
     async def cmd_unclaim(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Unclaim the print and revert the main chat message."""
@@ -905,6 +1441,42 @@ class BotHandlers:
             return
         printer_num, _ = resolved
         await update.effective_message.reply_text(await self._unclaim(context, printer_num))
+
+    async def cmd_anonymous(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Hide or show the user's name on their current and future prints."""
+        message = update.effective_message
+        # Saying "/anonymous on" in a group would give away who it is
+        if message.chat.type != "private":
+            await message.reply_text("Please use /anonymous in a private chat with the bot.")
+            return
+        user_id = update.effective_user.id
+        arg = context.args[0].lower() if context.args else ""
+        if arg not in ("", "on", "off"):
+            await message.reply_text("Usage: /anonymous [on|off]")
+            return
+        if arg:
+            await self._set_anonymous(context, user_id, arg == "on")
+        if self.storage.is_anonymous(user_id):
+            await message.reply_text("Anonymous is ON: other users see your prints as claimed by "
+                                     f"{ui.ANONYMOUS_NAME}. Admins can still see who claimed them in the log chat. "
+                                     "Turn it off with /anonymous off.")
+        else:
+            await message.reply_text("Anonymous is OFF: your name is shown on your prints. "
+                                     "Turn it on with /anonymous on.")
+
+    async def _set_anonymous(self, context: ContextTypes.DEFAULT_TYPE, user_id: int, enabled: bool):
+        """Save the setting and update the main chat messages of the user's current claims."""
+        for num in self.storage.set_anonymous(user_id, enabled):
+            session = self.storage.get_print(num)
+            try:
+                # Keep the "Report ruined print" button
+                await context.bot.edit_message_text(chat_id=session.chat_id, message_id=session.message_id,
+                                                    text=ui.claimed_text(num, session),
+                                                    reply_markup=self._claimed_keyboard(num, user_id))
+            except Exception as e:
+                print(f'Could not update main chat message for Printer {num} anonymity: {e}')
+        await self.ms.log_message(f"{self.storage.display_name(user_id)} turned anonymous "
+                                  f"{'on' if enabled else 'off'}.")
 
     async def _restart_many(self, update: Update, printer_nums: list[int]):
         """Restart printers concurrently and reply with one line per printer."""
@@ -967,6 +1539,42 @@ class BotHandlers:
             await self.ms.log_message(f"{self.storage.display_name(update.effective_user.id)} homed "
                                       f"Printer(s) {', '.join(map(str, homed))}.")
         await reply("\n".join(results))
+
+    async def cmd_beep(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Easter egg (anyone, not in /help): play a tune on an idle printer's buzzer."""
+        reply = update.effective_message.reply_text
+        args = context.args
+        if len(args) != 1 or not args[0].isdigit():
+            await reply(f"Usage: /beep <printer>\nAvailable printers: {self.pm.numbers_text()}")
+            return
+        printer_num = int(args[0])
+        if printer_num not in self.pm:
+            await reply(f"Invalid printer number. Use {self.pm.numbers_text()}")
+            return
+
+        printer = self.pm.get_online_printer(printer_num)
+        if not printer:
+            await reply(f"Printer {printer_num} is not connected.")
+            return
+        if printer.get_state() not in (GcodeState.IDLE, GcodeState.FINISH):
+            await reply(f"Printer {printer_num} is busy.")
+            return
+        wait = BEEP_COOLDOWN - (time.time() - self._last_beep.get(printer_num, 0))
+        if wait > 0:
+            await reply(f"Printer {printer_num} just beeped. Try again in {math.ceil(wait)}s.")
+            return
+
+        try:
+            sent = self.pm.beep(printer_num)
+        except Exception as e:
+            await reply(f"Failed to beep: {e}")
+            return
+        if not sent:
+            await reply(f"Failed to beep Printer {printer_num}.")
+            return
+        self._last_beep[printer_num] = time.time()
+        await self.ms.log_message(f"{self.storage.display_name(update.effective_user.id)} beeped Printer {printer_num}.")
+        await reply(f"Beep! Printer {printer_num} is playing a tune.")
 
     async def cmd_print(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Admin only (testing): print a 3MF from a replied-to document."""
@@ -1193,51 +1801,113 @@ class BotHandlers:
         await reply(f"{name} is now {new_role.label}.")
 
     async def cmd_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Owner only: show or change chat targets and the update interval."""
-        reply = update.effective_message.reply_text
+        """Owner only: show or change settings, chat targets and disabled commands."""
+        message = update.effective_message
+        reply = message.reply_text
         if self.storage.get_role(update.effective_user.id) != Role.OWNER:
             await reply("Only the owner can use this command.")
             return
 
         args = context.args
         if not args:
-            await reply(ui.config_text(self.settings, CONFIG_KEYS))
+            values = {key: get_config_value(self.settings, key) for key in CONFIG_KEYS}
+            await reply(ui.config_text(values, self.settings.disabled()))
             return
-        if args[0].lower() != "set" or len(args) != 3 or args[1].lower() not in CONFIG_KEYS:
+        if len(args) == 1 and args[0].lower() in ("allowhere", "denyhere"):
+            await self._config_command_chat(update, args[0].lower() == "allowhere")
+            return
+        # command_chats may be given as "-100123, -100456"
+        if args[0].lower() == "set" and len(args) > 3 and args[1].lower() == "command_chats":
+            args = args[:2] + ["".join(args[2:])]
+        action = args[0].lower()
+        if action in ("disable", "enable") and len(args) == 2:
+            await self._config_toggle_command(update, context, args[1].lower().lstrip("/"), action == "disable")
+            return
+        if action == "here" and len(args) == 2 and args[1].lower() in CHAT_TARGET_KEYS:
+            key = args[1].lower()
+            # Outside forum topics message_thread_id is a reply chain, not a topic
+            thread = message.message_thread_id if message.is_topic_message else None
+            raw = f"{message.chat_id}/{thread}" if thread else str(message.chat_id)
+        elif action == "set" and len(args) == 3 and args[1].lower() in CONFIG_KEYS:
+            key, raw = args[1].lower(), args[2]
+        else:
             await reply(CONFIG_USAGE)
             return
 
-        key, raw = args[1].lower(), args[2]
-        if key == "update_interval":
-            try:
-                value = float(raw)
-            except ValueError:
-                value = 0
-            # nan passes a < check and makes asyncio.sleep return at once; inf is allowed (see README)
-            if math.isnan(value) or value < MIN_UPDATE_INTERVAL:
-                await reply(f"update_interval must be a number of seconds, at least {MIN_UPDATE_INTERVAL}.")
-                return
-            value = int(value) if value.is_integer() else value
-        elif key == "log_chat_id" and raw.lower() in ("none", "off"):
-            value = None
-        else:
-            try:
-                parse_chat_id(raw)
-            except ValueError as e:
-                await reply(str(e))
-                return
-            value = raw
-
-        old = getattr(self.settings, key)
-        setattr(self.settings, key, value)
+        old = get_config_value(self.settings, key)
+        try:
+            value = CONFIG_KEYS[key].parse(raw)
+            set_config_value(self.settings, key, value)
+        except ValueError as e:
+            await reply(str(e))
+            return
         self.settings.save()
         # Point outgoing messages at the new chats straight away
         self.ms.ctx = get_bot_context(self.settings)
-        if key == "status_chat_id":
+        if key in ("status_chat_id", "status_thread_id"):
             self.ms.reset_status_message()
+        if key == "chat_id":
+            # Admin and owner command menus are scoped to the main chat
+            await self._refresh_command_menu(context)
         await self.ms.log_message(f"Config change: {self.storage.display_name(update.effective_user.id)} "
                                   f"set {key} from {old} to {value}.")
         await reply(f"{key} set to {value}.")
+
+    async def _config_toggle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, command: str,
+                                     disable: bool):
+        reply = update.effective_message.reply_text
+        if command not in DISABLEABLE_COMMANDS:
+            await reply(f"/{command} can't be turned off. Commands that can: "
+                        + ", ".join(f"/{name}" for name in DISABLEABLE_COMMANDS))
+            return
+        state = "disabled" if disable else "enabled"
+        if self.settings.is_disabled(command) == disable:
+            await reply(f"/{command} is already {state}.")
+            return
+        self.settings.disabled_commands[command] = disable
+        self.settings.save()
+        if command == "staff":
+            # Same as at startup: a disabled /staff leaves the owner as the only role
+            self.storage.roles_enabled = not disable
+        if command == "ruined_report":
+            # Failure notifications check this flag rather than settings
+            self.ms.ruined_button = not disable
+        await self._refresh_command_menu(context)
+        await self.ms.log_message(f"Config change: {self.storage.display_name(update.effective_user.id)} "
+                                  f"{state} /{command}.")
+        await reply(f"/{command} {state}.")
+
+    async def _refresh_command_menu(self, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            await set_command_menu(context.bot, self.storage, self.settings)
+        except Exception as e:
+            # The setting is saved either way; the menu catches up on the next restart
+            print(f"Failed to refresh command menu: {e}")
+    async def _config_command_chat(self, update: Update, allow: bool):
+        """/config allowhere|denyhere: add this group to command_chats or remove it."""
+        reply = update.effective_message.reply_text
+        chat = update.effective_chat
+        if chat.type == "private":
+            await reply("Run this in the group you want to allow or deny commands in.")
+            return
+        chat_id = str(chat.id)
+        chats = self.settings.command_chats
+        if allow == (chat_id in chats):
+            await reply(f"This chat is {'already' if allow else 'not'} in command_chats.")
+            return
+        if allow:
+            chats.append(chat_id)
+        else:
+            chats.remove(chat_id)
+        self.settings.save()
+        await self.ms.log_message(f"Config change: {self.storage.display_name(update.effective_user.id)} "
+                                  f"{'allowed' if allow else 'removed'} commands in {chat.title} ({chat_id}).")
+        if allow:
+            await reply("Commands now work in this chat.")
+        elif chat_id in self._command_chat_ids():
+            await reply("Removed from command_chats, but commands still work here because it's the status or log chat.")
+        else:
+            await reply("Commands no longer work in this chat. Use them in a DM with the bot.")
 
     @staticmethod
     def _printer_field_error(field: str, value: str) -> str | None:
@@ -1342,23 +2012,69 @@ class BotHandlers:
         await self.ms.log_message(f"Printer change: {actor} set Printer {num} {field} to {shown}.")
         await reply(f"Printer {num} {field} set to {shown}." + (" Reconnecting..." if field != "mac" else ""))
 
+    # --- Feedback ---
+
+    async def cmd_reportbug(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._send_feedback(update, context, "reportbug")
+
+    async def cmd_suggestfeature(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._send_feedback(update, context, "suggestfeature")
+
+    def _feedback_target(self) -> tuple[str | None, int | None]:
+        """feedback_chat_id (with feedback_thread_id as its topic), or the log chat when unset."""
+        if not self.settings.feedback_chat_id:
+            return self.ms.ctx.log_chat_id, self.ms.ctx.log_thread_id
+        chat_id, thread_id = parse_chat_id(self.settings.feedback_chat_id)
+        return chat_id, self.settings.feedback_thread_id or thread_id
+
+    async def _send_feedback(self, update: Update, context: ContextTypes.DEFAULT_TYPE, command: str):
+        """Post a /reportbug or /suggestfeature message to the feedback chat."""
+        message = update.effective_message
+        reply = message.reply_text
+        # The text after the command, keeping its line breaks; otherwise the replied-to message's text
+        parts = (message.text or "").split(None, 1)
+        text = parts[1].strip() if len(parts) > 1 else ""
+        if not text:
+            reply_to = _replied_to(message)
+            text = ((reply_to.text or reply_to.caption or "") if reply_to else "").strip()
+        if not text:
+            await reply(f"Usage: /{command} <text>, or reply to a message with /{command}")
+            return
+        if len(text) > MAX_FEEDBACK_LENGTH:
+            await reply(f"That's too long ({len(text)} characters). Please keep it under {MAX_FEEDBACK_LENGTH}.")
+            return
+
+        chat_id, thread_id = self._feedback_target()
+        if not chat_id:
+            await reply("Feedback isn't set up on this bot.")
+            return
+
+        user = update.effective_user
+        now = time.monotonic()
+        last = self._last_feedback.get(user.id)
+        if last is not None and now - last < FEEDBACK_COOLDOWN:
+            await reply(f"Please wait {math.ceil(FEEDBACK_COOLDOWN - (now - last))} s before sending more feedback.")
+            return
+
+        chat = message.chat
+        source = "private chat" if chat.type == "private" else f"{chat.title or chat.id} ({chat.id})"
+        post = f"{FEEDBACK_HEADERS[command]}\nFrom: {_mention(user)} ({user.id})\nChat: {source}\n\n{text}"
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=post, message_thread_id=thread_id)
+        except Exception as e:
+            print(f"Failed to send /{command} feedback: {e}")
+            await reply("Sorry, your feedback couldn't be sent. Please try again later.")
+            return
+        self._last_feedback[user.id] = now
+        await reply("Thanks, sent to the maintainers.")
+
     # --- Callback buttons ---
 
     async def cb_claim(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Legacy "Claim Print" buttons on old messages: open the DM instead of claiming from the group."""
         query = update.callback_query
-        user = query.from_user
         printer_num, _ = _parse_callback(query)
-
-        session = self.storage.get_print(printer_num)
-        if not session:
-            await query.answer()
-            await query.edit_message_text(ui.SESSION_ENDED)
-            return
-        if session.claimed_by:
-            await query.answer(f"Already claimed by {session.claimed_username}", show_alert=True)
-            return
-        await query.answer()
-        await self._claim(context, user.id, _mention(user), printer_num)
+        await query.answer(url=ui.claim_link(context.bot.username, printer_num))
 
     async def _claimer_session(self, query: CallbackQuery, printer_num: int):
         """Return the session if the button presser is its claimer, otherwise answer the query and return None."""
@@ -1380,7 +2096,7 @@ class BotHandlers:
             return
 
         self.storage.set_dm_preference(printer_num, preference)
-        text, keyboard = ui.settings_message(printer_num, self.storage.get_print(printer_num))
+        text, keyboard = self._settings_message(printer_num)
         await query.edit_message_text(text, reply_markup=keyboard)
 
     async def cb_layer2_toggle(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1391,8 +2107,37 @@ class BotHandlers:
             return
 
         self.storage.set_layer2_notify(printer_num, not session.layer2_notify)
-        text, keyboard = ui.settings_message(printer_num, self.storage.get_print(printer_num))
+        text, keyboard = self._settings_message(printer_num)
         await query.edit_message_text(text, reply_markup=keyboard)
+
+    async def cb_anonymous_toggle(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        printer_num, _ = _parse_callback(query)
+        if self.settings.is_disabled("anonymous"):
+            await query.answer("/anonymous is disabled on this bot.", show_alert=True)
+            return
+        session = await self._claimer_session(query, printer_num)
+        if not session:
+            return
+
+        await self._set_anonymous(context, query.from_user.id, not session.anonymous)
+        text, keyboard = self._settings_message(printer_num)
+        await query.edit_message_text(text, reply_markup=keyboard)
+
+    async def cb_cooldown_toggle(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        printer_num, _ = _parse_callback(query)
+        session = await self._claimer_session(query, printer_num)
+        if not session:
+            return
+
+        self.storage.set_cooldown_notify(printer_num, not session.cooldown_notify)
+        text, keyboard = self._settings_message(printer_num)
+        await query.edit_message_text(text, reply_markup=keyboard)
+
+    def _settings_message(self, printer_num: int):
+        return ui.settings_message(printer_num, self.storage.get_print(printer_num),
+                                   anonymous_toggle=not self.settings.is_disabled("anonymous"))
 
     async def cb_unclaim(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -1426,6 +2171,85 @@ class BotHandlers:
                                   caption=f"Camera image from Printer {printer_num} (updated {time.strftime('%H:%M:%S')})"),
             reply_markup=query.message.reply_markup,
         )
+
+    async def cb_report_ruined(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Ask the presser what's wrong with a claimed print. Their reply is passed on to the claimer."""
+        query = update.callback_query
+        if self.settings.is_disabled("ruined_report"):
+            await query.answer("Reporting ruined prints is disabled on this bot.", show_alert=True)
+            return
+        printer_num, claimer = _parse_callback(query)
+        if printer_num in self._ruined_questions:
+            await query.answer(f"Someone is already reporting Printer {printer_num}'s print.", show_alert=True)
+            return
+        presser = query.from_user
+        # Reserve the printer before sending, since updates are handled concurrently
+        pending = _RuinedQuestion(printer_num, int(claimer), presser.id)
+        self._ruined_questions[printer_num] = pending
+        await query.answer()
+
+        # ForceReply(selective) only opens the reply for users mentioned in the text
+        name = html.escape(_mention(presser))
+        mention = name if presser.username else f'<a href="tg://user?id={presser.id}">{name}</a>'
+        try:
+            question = await query.message.reply_text(
+                f"{mention}, what's wrong with Printer {printer_num}'s print? Reply to this message with the cause.",
+                parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
+        except Exception as e:
+            del self._ruined_questions[printer_num]
+            print(f'Could not ask about ruined Printer {printer_num}: {e}')
+            return
+        pending.chat_id, pending.message_id = question.chat_id, question.message_id
+        pending.timeout = asyncio.create_task(self._expire_ruined_question(pending))
+
+    async def _expire_ruined_question(self, pending: _RuinedQuestion):
+        """Delete an unanswered question after ruined_report_timeout, without telling the claimer."""
+        await asyncio.sleep(self.settings.ruined_report_timeout)
+        if self._ruined_questions.get(pending.printer_num) is pending:
+            del self._ruined_questions[pending.printer_num]
+            await self.ms._delete(pending.chat_id, pending.message_id)
+
+    async def on_ruined_reply(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Pass the presser's reply to a ruined print question on to the claimer. Other replies are ignored."""
+        message = update.effective_message
+        reply_to = getattr(message, "reply_to_message", None)
+        if not reply_to or not update.effective_user:
+            return
+        pending = next((q for q in self._ruined_questions.values()
+                        if q.message_id == reply_to.message_id and q.chat_id == message.chat_id), None)
+        if not pending or pending.presser_id != update.effective_user.id:
+            return
+        del self._ruined_questions[pending.printer_num]
+        pending.timeout.cancel()
+
+        printer_num = pending.printer_num
+        cause = (message.text or message.caption or "").strip() or "no cause given"
+        session = self.storage.get_print(printer_num)
+        if not session or session.claimed_by != pending.claimer_id:
+            # Failure messages keep the button after the session has ended
+            session = PrintSession(0, message.chat_id, printer_num, claimed_by=pending.claimer_id,
+                                   claimed_username=self.storage.display_name(pending.claimer_id),
+                                   anonymous=self.storage.is_anonymous(pending.claimer_id))
+        presser = self.storage.display_name(pending.presser_id)
+        try:
+            await self.ms.send_ruined_report(
+                session, f"⚠️ {presser} reports your print on Printer {printer_num} is ruined: {cause}")
+            # Posted in the main chat, so an anonymous claimer stays anonymous
+            confirm = f"Thanks, {ui.public_claimer_name(session)} has been told about Printer {printer_num}."
+        except Exception as e:
+            print(f'Failed to send ruined print report for Printer {printer_num}: {e}')
+            confirm = f"Couldn't reach {ui.public_claimer_name(session)} about Printer {printer_num}."
+        await self.ms.log_message(f"Ruined print: {presser} reported {session.claimed_username}'s print "
+                                  f"on Printer {printer_num}: {cause}")
+
+        # Keep the main chat clean: the question, the reply (needs delete rights) and, shortly, the confirmation
+        await self.ms._delete(pending.chat_id, pending.message_id)
+        await self.ms._delete(message.chat_id, message.message_id)
+        try:
+            sent = await message.reply_text(confirm, do_quote=False)
+            self.ms.delete_later([(sent.chat_id, sent.message_id)], RUINED_CONFIRM_TTL)
+        except Exception as e:
+            print(f'Could not confirm ruined print report for Printer {printer_num}: {e}')
 
     async def cb_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query

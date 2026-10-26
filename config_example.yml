@@ -10,16 +10,36 @@ telegram_bot_token: '1234567890:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'
 owner_id: 1234567890
 
 # Chat targets: 'chat_id' or 'chat_id/thread_id' for forum topics.
-# The owner can change these at runtime with /config set <key> <value>.
+# The owner can change these at runtime with /config set <key> <value>, set just the
+# topic with /config set <thread_id|status_thread_id|log_thread_id> <id>, or send
+# /config here <key> in the target chat or topic.
 chat_id: '1234567890/1234'         # Main chat for print updates
 status_chat_id: '1234567890/1234'  # Chat for the live status message
 log_chat_id: '1234567890'          # Chat for logs, or null to disable
+feedback_chat_id: null            # Chat for /reportbug and /suggestfeature, or null to use the log chat
+feedback_thread_id: null          # Forum topic in feedback_chat_id (optional)
 
-update_interval: 3          # seconds between printer polls (owner can change with /config)
+# The owner can change these with /config set <key> <value>.
+update_interval: 3          # seconds between printer polls
 stats_log_interval: 3600    # seconds between update timing/status reports, or null to disable
+latency_warn_seconds: 10    # log when a printer sends no update (or a poll takes) this long, or null to disable
 auto_restart_printers: true # false to only log idle printers with no camera instead of rebooting them
+low_filament_alerts: false  # true to warn claimers of low filament; false only logs what would have been sent
+log_commands: false         # true to post every command and button press to the log chat (owner can change with /config)
+ruined_report_timeout: 10   # seconds to wait for the cause after "Report ruined print" (owner can change with /config)
+info_reply_ttl: 60          # seconds before replies to /help, /info, /camera etc. in groups are deleted
+                            # (with the command), or null to keep them. DM replies are never deleted.
 
-# Set a command to true to turn it off. A disabled /staff also leaves the owner as the
+# Commands only work in DMs with the bot and in these group chats: the status chat, the log
+# chat (unless one of them is the main chat) and command_chats. Elsewhere, notably the main
+# chat, the bot deletes the command (if it may) and tells the sender to use the DM.
+# The owner can change these with /config set, or /config allowhere|denyhere in a group.
+dm_only_commands: true      # false to take commands in every chat again
+command_chats: []           # extra group chat ids, e.g. ['-1001234567890']
+
+# Set a command to true to turn it off (the owner can use /config disable|enable <command>).
+# ruined_report is the "Report ruined print" button.
+# A disabled /staff also leaves the owner as the
 # only role: admins and mods are treated as users until it is turned back on.
 # (/forceunclaim can't be turned off, so admins can still free up a printer.)
 disabled_commands:
@@ -32,6 +52,12 @@ disabled_commands:
   restart: false
   restartall: false
   home: false
+  beep: false
+  reportbug: false
+  suggestfeature: false
+  anonymous: false  # true stops users changing it; names already hidden stay hidden
+  ruined_report: false
+  queue: false       # also turns off /unqueue
 
 # Printers by number. Admins can manage these with /printer.
 printers:
