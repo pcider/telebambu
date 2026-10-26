@@ -60,9 +60,19 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    Upgrading from `config.py`? Start the bot once without a `config.yml` and it will create one
    from your `config.py`, which can then be deleted.
 
-   The owner can change `chat_id`, `status_chat_id`, `log_chat_id`, `update_interval` and `low_filament_alerts` at runtime
-   with `/config`. The bot rewrites `config.yml` when settings change, so hand-written comments
-   are not kept.
+   The owner can change every setting except the bot token, `owner_id` (use `/staff edit owner`)
+   and the printers (use `/printer`) at runtime with `/config`, and changes take effect without a
+   restart. The bot rewrites `config.yml` when settings change, so hand-written comments are not kept.
+   - `/config set <key> <value>` for `chat_id`, `status_chat_id`, `log_chat_id` (`none` turns the
+     log chat off), `update_interval`, `stats_log_interval` (`none` turns the report off) and
+     `auto_restart_printers` and `low_filament_alerts` (`true`/`false`).
+   - `thread_id`, `status_thread_id` and `log_thread_id` set just the topic of those chats
+     (`none` for no topic).
+   - `/config here <chat_id|status_chat_id|log_chat_id>`, sent in the target chat or forum topic,
+     sets that chat and topic without having to look up their ids.
+   - `/config disable <command>` and `/config enable <command>` change `disabled_commands`.
+
+   Every change is posted to the log chat.
 
    `update_interval` must be at least 1 second, but has no upper limit. `/config set update_interval inf`
    is accepted and stops printer polling, notifications and the status message. Setting it back with
@@ -76,7 +86,8 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    owner as the only role: admins and mods are treated as ordinary users, but their roles stay in
    `data.json` and come back when `staff` is set to `false` again.
 
-   Changes take effect after a restart.
+   Changes made with `/config disable|enable` take effect at once; edits to `config.yml` by hand
+   take effect after a restart.
 
    **Finding your printer information:**
    - **IP Address**: Check your router's DHCP client list or the printer's network settings
@@ -181,7 +192,9 @@ sudo systemctl start telebambu
 **Owner**
 - `/staff edit <admin|mod|user> <user>` - Add or remove admins and mods
 - `/staff edit owner <user>` - Transfer ownership (asks for confirmation; you become an admin)
-- `/config` / `/config set <key> <value>` - Change `chat_id`, `status_chat_id`, `log_chat_id`, `update_interval` or `low_filament_alerts`
+- `/config` / `/config set <key> <value>` - Show or change settings (chats, topics, intervals, `auto_restart_printers`, `low_filament_alerts`)
+- `/config here <chat_id|status_chat_id|log_chat_id>` - Point that chat target at the chat and topic the command is sent in
+- `/config disable <command>` / `/config enable <command>` - Turn a command off or on
 
 Role changes, force reclaims, restarts and printer/config changes are posted to the log chat.
 Mods have no extra permissions yet.

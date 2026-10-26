@@ -49,8 +49,10 @@ OWNER_HELP = (
     "Owner commands:\n"
     "/staff edit <admin|mod|user> <user> - Add or remove admins and mods\n"
     "/staff edit owner <user> - Transfer ownership (you become an admin)\n"
-    "/config - Show chat targets and update interval\n"
-    "/config set <chat_id|status_chat_id|log_chat_id|update_interval|low_filament_alerts> <value> - Change them"
+    "/config - Show settings and disabled commands\n"
+    "/config set <key> <value> - Change a setting\n"
+    "/config here <chat_id|status_chat_id|log_chat_id> - Use the chat and topic you send it in\n"
+    "/config disable <command> / /config enable <command> - Turn a command off or on"
 )
 
 
@@ -175,9 +177,11 @@ def staff_list_text(storage: Storage) -> str:
     return "\n".join(lines)
 
 
-def config_text(settings, keys) -> str:
-    lines = ["Config (change with /config set <key> <value>):"]
-    lines += [f"- {key}: {getattr(settings, key)}" for key in keys]
+def config_text(values: dict, disabled: frozenset[str]) -> str:
+    lines = ["Config (change with /config set <key> <value>, or /config here <key> in the target chat):"]
+    lines += [f"- {key}: {value}" for key, value in values.items()]
+    disabled_list = ", ".join(f"/{command}" for command in sorted(disabled)) or "none"
+    lines.append(f"Disabled commands: {disabled_list} (change with /config disable|enable <command>)")
     return "\n".join(lines)
 
 
