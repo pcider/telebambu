@@ -25,6 +25,28 @@ LOW_FILAMENT_PERCENT = 10
 NOT_PRINTING_STATES = (GcodeState.IDLE, GcodeState.FINISH)
 # States where a print is underway
 ACTIVE_PRINT_STATES = (GcodeState.RUNNING, GcodeState.PAUSE)
+# Bed temperature (°C) at which a finished print comes off easily, by filament type prefix
+BED_REMOVAL_TEMPS = {
+    'PLA': 35,
+    'PETG': 40,
+    'PCTG': 40,
+    'TPU': 35,
+    'ABS': 50,
+    'ASA': 50,
+    'PC': 60,
+    'PA': 50,
+    'NYLON': 50,
+}
+DEFAULT_BED_REMOVAL_TEMP = 40
+# Stop waiting for a finished print's bed to cool after this long
+BED_COOLDOWN_TIMEOUT = 2 * 60 * 60  # seconds
+
+
+def bed_removal_temp(material: str) -> int:
+    """Removal temperature for a filament type, matching the longest prefix (so PCTG isn't PC)."""
+    material = material.upper()
+    matches = [prefix for prefix in BED_REMOVAL_TEMPS if material.startswith(prefix)]
+    return BED_REMOVAL_TEMPS[max(matches, key=len)] if matches else DEFAULT_BED_REMOVAL_TEMP
 
 
 def _print_name(name: str) -> str:
@@ -65,6 +87,8 @@ class PrinterMonitor:
         self._stats_since = time.monotonic()
         self._last_tick_at: float | None = None
         self._tick_gaps: list[float] = []
+        # Filament type last seen feeding each printer's print; the AMS may unload it before FINISH
+        self._used_material: dict[int, str] = {}
 
     async def run(self):
         while True:
@@ -126,6 +150,7 @@ class PrinterMonitor:
             await self._check_stale_camera(num)
             await self._check_periodic_camera(num)
             await self._check_low_filament(num)
+            await self._check_bed_cooldown(num)
         except Exception as e:
             print(f'Error running checks for printer {num}: {e}')
 
@@ -163,10 +188,44 @@ class PrinterMonitor:
         if not snap or snap.state != GcodeState.RUNNING:
             return
         tray = next((t for t in self.pm.filament(num) if t.active), None)
+        if tray:
+            self._used_material[num] = tray.material
         if not tray or not 0 <= tray.remain <= LOW_FILAMENT_PERCENT or tray.tray_id in session.low_filament_alerted:
             return
         self.storage.mark_low_filament_alerted(num, tray.tray_id)
         await self.ms.send_filament_notification(num, f"Filament is running low ({tray.describe()}).")
+
+    def _watch_bed_cooldown(self, num: int):
+        """At FINISH, remember the claimer and filament so they can be told when the bed has cooled."""
+        material = self._used_material.pop(num, None)
+        session = self.storage.get_print(num)
+        if not session or not session.claimed_by or not session.cooldown_notify:
+            return
+        if not material:
+            tray = next((t for t in self.pm.filament(num) if t.active), None)
+            material = tray.material if tray and tray.material else 'unknown'
+        self.storage.start_bed_cooldown(num, session.claimed_by, session.claimed_username, material)
+
+    async def _check_bed_cooldown(self, num: int):
+        """DM a finished print's claimer once when the bed is cool enough to remove it."""
+        cooldown = self.storage.get_bed_cooldown(num)
+        if not cooldown:
+            return
+        if time.time() - cooldown.finished_at > BED_COOLDOWN_TIMEOUT:
+            self.storage.end_bed_cooldown(num)
+            return
+        printer = self.pm.get_online_printer(num)
+        if not printer:
+            return
+        if printer.get_state() not in NOT_PRINTING_STATES:
+            # Another print is on its way, so the finished one has been taken off
+            self.storage.end_bed_cooldown(num)
+            return
+        bed_temp = printer.get_bed_temperature()
+        if not isinstance(bed_temp, (int, float)) or bed_temp > bed_removal_temp(cooldown.material):
+            return
+        self.storage.end_bed_cooldown(num)
+        await self.ms.send_bed_cooldown_notification(cooldown, bed_temp)
 
     async def _check_periodic_camera(self, num: int):
         """Send a recurring camera snapshot when the claimer's configured trigger is due."""
@@ -204,6 +263,7 @@ class PrinterMonitor:
                     f'Printer {num} PRINT state: {event.data["prev_print"]} -> {event.data["new_print"]}', stdout_only=True)
 
         elif event.type == EventType.PRINT_STARTED:
+            self._used_material.pop(num, None)
             await asyncio.sleep(PRINT_STARTED_DELAY)
             await self.ms.send_print_started(num, format_duration(printer.get_time()), to_int(printer.total_layer_num()),
                                              self.pm.file_name(num) or None, names=self.pm.print_names(num))
@@ -212,6 +272,7 @@ class PrinterMonitor:
             await self._reconcile_on_startup(num, event.data['state'])
 
         elif event.type == EventType.PRINT_FINISHED:
+            self._watch_bed_cooldown(num)
             await self.ms.send_print_finished(num, await self.pm.get_camera_frame(num))
 
         elif event.type == EventType.PRINT_FAILED:

@@ -9,7 +9,7 @@ from telegram.constants import MessageLimit, ParseMode
 from telegram.error import BadRequest, Forbidden
 
 from data import Storage
-from data.storage import PrintSession
+from data.storage import BedCooldown, PrintSession
 from errors import lookup_error
 from . import ui
 from .telegram_bot import BotContext
@@ -266,6 +266,18 @@ class MessageService:
         await self._notify_claimer(printer_num, f"Printer {printer_num}: Camera update ({detail}).{suffix}", image,
                                    group_fallback=False)
         self.storage.mark_notify_every_sent(printer_num, trigger_value)
+
+    async def send_bed_cooldown_notification(self, cooldown: BedCooldown, bed_temp: float):
+        """Tell a finished print's claimer the bed is cool enough to take the print off.
+        The session has already ended, so a stand-in carries the claimer for the DM fallback."""
+        session = PrintSession(message_id=0, chat_id=self.ctx.chat_id, printer_num=cooldown.printer_num,
+                               claimed_by=cooldown.user_id, claimed_username=cooldown.username)
+        message = (f"Printer {cooldown.printer_num}'s bed has cooled to {bed_temp:.0f} °C ({cooldown.material}) "
+                   f"— your print should come off easily now.")
+        try:
+            await self._send_claimer_dm(session, message)
+        except Exception as e:
+            print(f'Failed to send bed cooldown notification for Printer {cooldown.printer_num}: {e}')
 
     # --- Log chat ---
 
