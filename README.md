@@ -60,7 +60,8 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    Upgrading from `config.py`? Start the bot once without a `config.yml` and it will create one
    from your `config.py`, which can then be deleted.
 
-   The owner can change `chat_id`, `status_chat_id`, `log_chat_id` and `update_interval` at runtime
+   The owner can change `chat_id`, `status_chat_id`, `log_chat_id`, `update_interval` and
+   `latency_warn_seconds` at runtime
    with `/config`. The bot rewrites `config.yml` when settings change, so hand-written comments
    are not kept.
 
@@ -69,6 +70,12 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    `/config` doesn't help, because the monitor is already waiting out the old interval, and the value is
    saved to `config.yml`, so it also survives restarts. To undo it, stop the bot, change
    `update_interval` in `config.yml` by hand, and start it again.
+
+   `latency_warn_seconds` (default 10) logs a line to the log chat when a connected printer has sent
+   no MQTT message for that long ("Printer 3: no update for 12.3 s"), and once more when messages
+   resume, with the length of the gap. It also logs any printer poll that takes longer than that.
+   Offline printers are left to the usual "unreachable" message. `/config set latency_warn_seconds off`
+   (or `null` in `config.yml`) turns it off.
 
    `disabled_commands` turns individual commands off: set `print`, `speed`, `skip`, `staff`,
    `forcereclaim`, `restart`, `restartall` or `home` to `true`. Disabled commands are hidden from
@@ -181,7 +188,8 @@ sudo systemctl start telebambu
 **Owner**
 - `/staff edit <admin|mod|user> <user>` - Add or remove admins and mods
 - `/staff edit owner <user>` - Transfer ownership (asks for confirmation; you become an admin)
-- `/config` / `/config set <key> <value>` - Change `chat_id`, `status_chat_id`, `log_chat_id` or `update_interval`
+- `/config` / `/config set <key> <value>` - Change `chat_id`, `status_chat_id`, `log_chat_id`,
+  `update_interval` or `latency_warn_seconds`
 
 Role changes, force reclaims, restarts and printer/config changes are posted to the log chat.
 Mods have no extra permissions yet.

@@ -22,9 +22,10 @@ from settings import DISABLEABLE_COMMANDS, PrinterConfig, Settings
 
 NOTIFY_USAGE = "Usage: /notify [printer] <layer> or /notify [printer] <percent>%"
 NOTIFY_EVERY_USAGE = "Usage: /notify_every [printer] layers <number>, time <minutes>, percent <number>, or off"
-CONFIG_USAGE = "Usage: /config or /config set <chat_id|status_chat_id|log_chat_id|update_interval> <value>"
+CONFIG_USAGE = ("Usage: /config or /config set "
+                "<chat_id|status_chat_id|log_chat_id|update_interval|latency_warn_seconds> <value>")
 # Settings the owner can change at runtime; chat targets are 'chat_id' or 'chat_id/thread_id'
-CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "update_interval")
+CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "update_interval", "latency_warn_seconds")
 MIN_UPDATE_INTERVAL = 1  # seconds
 PRINTER_USAGE = (
     "Usage:\n"
@@ -1101,7 +1102,7 @@ class BotHandlers:
         await reply(f"{name} is now {new_role.label}.")
 
     async def cmd_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Owner only: show or change chat targets and the update interval."""
+        """Owner only: show or change chat targets, the update interval and the latency warning."""
         reply = update.effective_message.reply_text
         if self.storage.get_role(update.effective_user.id) != Role.OWNER:
             await reply("Only the owner can use this command.")
@@ -1126,6 +1127,18 @@ class BotHandlers:
                 await reply(f"update_interval must be a number of seconds, at least {MIN_UPDATE_INTERVAL}.")
                 return
             value = int(value) if value.is_integer() else value
+        elif key == "latency_warn_seconds":
+            if raw.lower() in ("none", "off"):
+                value = None
+            else:
+                try:
+                    value = float(raw)
+                except ValueError:
+                    value = 0
+                if not 0 < value < math.inf:
+                    await reply("latency_warn_seconds must be a positive number of seconds, or off.")
+                    return
+                value = int(value) if value.is_integer() else value
         elif key == "log_chat_id" and raw.lower() in ("none", "off"):
             value = None
         else:

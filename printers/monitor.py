@@ -65,16 +65,29 @@ class PrinterMonitor:
         self._stats_since = time.monotonic()
         self._last_tick_at: float | None = None
         self._tick_gaps: list[float] = []
+        # Printers with no MQTT message for latency_warn_seconds, mapped to when their last update arrived
+        self._stale_since: dict[int, float] = {}
 
     async def run(self):
         while True:
             await asyncio.sleep(self.settings.update_interval)
             self._record_tick()
+            started = time.monotonic()
             try:
                 await self.log_stats_if_due()
                 await self.tick()
             except Exception as e:
                 print(f'Monitor tick failed: {e}')
+            try:
+                await self._check_tick_lag(time.monotonic() - started)
+            except Exception as e:
+                print(f'Failed to check tick lag: {e}')
+
+    async def _check_tick_lag(self, elapsed: float):
+        """Log a tick that took longer than latency_warn_seconds (status and events were late)."""
+        threshold = self.settings.latency_warn_seconds
+        if threshold and elapsed > threshold:
+            await self.ms.log_message(f'Monitor tick took {elapsed:.1f} s')
 
     def _record_tick(self):
         now = time.monotonic()
@@ -126,6 +139,7 @@ class PrinterMonitor:
             await self._check_stale_camera(num)
             await self._check_periodic_camera(num)
             await self._check_low_filament(num)
+            await self._check_latency(num)
         except Exception as e:
             print(f'Error running checks for printer {num}: {e}')
 
@@ -153,6 +167,23 @@ class PrinterMonitor:
         elif has_frame:
             # Camera recovered, clear the flag
             self._stale_camera_reported.discard(num)
+
+    async def _check_latency(self, num: int):
+        """Log once when a printer stops sending MQTT updates, and again when they resume.
+        Offline printers are skipped, reconnect_if_needed already reports those."""
+        threshold = self.settings.latency_warn_seconds
+        age = self.pm.seconds_since_message(num)
+        if age is None or not threshold:
+            self._stale_since.pop(num, None)
+            return
+        if age > threshold:
+            if num not in self._stale_since:
+                # Remember when the last update arrived, to report the whole gap on recovery
+                self._stale_since[num] = time.monotonic() - age
+                await self.ms.log_message(f'Printer {num}: no update for {age:.1f} s')
+        elif num in self._stale_since:
+            stale_for = time.monotonic() - age - self._stale_since.pop(num)
+            await self.ms.log_message(f'Printer {num}: updates resumed after {stale_for:.1f} s')
 
     async def _check_low_filament(self, num: int):
         """Warn a claimed print's users once when the spool in use is nearly empty."""

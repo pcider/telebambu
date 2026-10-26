@@ -179,6 +179,15 @@ def parse_filament(print_data: dict) -> list[FilamentTray]:
     return trays
 
 
+def _track_messages(slot: 'PrinterSlot'):
+    """Record when each MQTT message arrives. bambulabs_api calls on_message_handler from
+    its MQTT thread for every message; the getters only read cached data, so this is the
+    only way to tell fresh data from stale."""
+    def on_message(*_):
+        slot.last_message_at = time.monotonic()
+    slot.printer.mqtt_client.on_message_handler = on_message
+
+
 @dataclass
 class PrinterSlot:
     """A configured printer and the state tracked for it between polls."""
@@ -191,6 +200,8 @@ class PrinterSlot:
     prev_layer: int = 0
     last_paused_time: float = 0.0
     connected_at: float = 0.0
+    # time.monotonic() of the last MQTT message from the printer (or of the last connect), set from the MQTT thread
+    last_message_at: float = 0.0
     camera_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Objects of the current print, keyed by its file so a new print re-reads them
     objects_cache: tuple[str, list[files.PrintObject]] | None = None
@@ -235,8 +246,10 @@ class PrinterManager:
             # Keep the Printer object even if the first connect fails, so
             # reconnect_if_needed() can keep retrying it.
             slot.printer = bl.Printer(slot.ip, slot.access_code, slot.serial)
+            _track_messages(slot)
             slot.printer.connect()
             slot.connected_at = time.time()
+            slot.last_message_at = time.monotonic()
         except Exception as e:
             await log_fn(f'Failed to connect to printer {num}: {e}')
 
@@ -260,6 +273,7 @@ class PrinterManager:
             try:
                 printer.connect()
                 slot.connected_at = time.time()
+                slot.last_message_at = time.monotonic()
             except Exception as e:
                 if first_failure:
                     print(f'Failed to reconnect printer {num}: {e}')
@@ -320,6 +334,7 @@ class PrinterManager:
             raise TimeoutError(f'still not done after {RESTART_TIMEOUT}s, '
                                'the camera thread is probably stuck') from None
         self.slots[num].connected_at = time.time()
+        self.slots[num].last_message_at = time.monotonic()
 
     # --- Accessors ---
 
@@ -329,6 +344,12 @@ class PrinterManager:
 
     def seconds_since_connect(self, num: int) -> float:
         return time.time() - self.slots[num].connected_at
+
+    def seconds_since_message(self, num: int) -> float | None:
+        """Seconds since the printer last sent an MQTT message, or None if it's offline."""
+        if not self.get_online_printer(num):
+            return None
+        return time.monotonic() - self.slots[num].last_message_at
 
     def get_online_printer(self, num: int) -> Printer | None:
         """The printer if it's connected and has reported state, else None."""
