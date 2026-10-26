@@ -1,18 +1,20 @@
 import asyncio
+import html
 import ipaddress
 import math
 import re
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 
-from telegram import Update, CallbackQuery, InputFile, InputMediaPhoto, MessageEntity
+from telegram import Update, CallbackQuery, ForceReply, InputFile, InputMediaPhoto, MessageEntity
 from telegram.constants import ParseMode
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
                           TypeHandler, filters)
 from bambulabs_api import GcodeState
 
 from data import Role, Storage, can_assign
+from data.storage import PrintSession
 from printers import EXTERNAL_SPOOL_TRAY, PrinterManager, SPEED_LEVELS
 from printers import files
 from . import ui
@@ -22,9 +24,10 @@ from settings import DISABLEABLE_COMMANDS, PrinterConfig, Settings
 
 NOTIFY_USAGE = "Usage: /notify [printer] <layer> or /notify [printer] <percent>%"
 NOTIFY_EVERY_USAGE = "Usage: /notify_every [printer] layers <number>, time <minutes>, percent <number>, or off"
-CONFIG_USAGE = "Usage: /config or /config set <chat_id|status_chat_id|log_chat_id|update_interval> <value>"
+CONFIG_USAGE = ("Usage: /config or /config set "
+                "<chat_id|status_chat_id|log_chat_id|update_interval|ruined_report_timeout> <value>")
 # Settings the owner can change at runtime; chat targets are 'chat_id' or 'chat_id/thread_id'
-CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "update_interval")
+CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "update_interval", "ruined_report_timeout")
 MIN_UPDATE_INTERVAL = 1  # seconds
 PRINTER_USAGE = (
     "Usage:\n"
@@ -45,6 +48,18 @@ MAX_PRINT_FILE_SIZE = 20 * 1024 * 1024
 # States in which a printer can start a new print
 READY_STATES = (GcodeState.IDLE, GcodeState.FINISH, GcodeState.FAILED)
 STAFF_USAGE = "Usage: /staff list [user] or /staff edit <owner|admin|mod|user> <user>"
+RUINED_CONFIRM_TTL = 5  # seconds before the "told the claimer" confirmation is deleted
+
+
+@dataclass
+class _RuinedQuestion:
+    """A "what's wrong with the print?" question waiting for the button presser's reply (memory only)."""
+    printer_num: int
+    claimer_id: int
+    presser_id: int
+    chat_id: int | None = None
+    message_id: int | None = None
+    timeout: asyncio.Task | None = None
 
 
 # Buttons sent before printers were 1-based, e.g. ``claim_0`` or ``dm_pref_0_chat``
@@ -96,6 +111,10 @@ class BotHandlers:
         self.ms = message_service
         self.pm = printer_manager
         self.settings = settings
+        # Printer number -> its pending ruined print question, one per printer
+        self._ruined_questions: dict[int, _RuinedQuestion] = {}
+        # Failure notifications follow the same disable flag (read at startup, like the command menu)
+        message_service.ruined_button = not settings.is_disabled("ruined_report")
 
     def register(self, app: Application):
         # Runs before every other handler so @usernames can be resolved later
@@ -141,10 +160,13 @@ class BotHandlers:
             _callback_pattern("layer2", "layer2_toggle"): self.cb_layer2_toggle,
             _callback_pattern("unclaim", "unclaim"): self.cb_unclaim,
             r"^cam:\d+$": self.cb_refresh_camera,
+            r"^ruined:\d+:\d+$": self.cb_report_ruined,
             r"^help$": self.cb_help,
         }
         for pattern, callback in callbacks.items():
             app.add_handler(CallbackQueryHandler(callback, pattern=pattern))
+        # Its own group, so replies still reach any other message handler
+        app.add_handler(MessageHandler(filters.REPLY & ~filters.COMMAND, self.on_ruined_reply), group=1)
 
     def _unless_disabled(self, name: str, callback):
         """Wrap a command so it refuses to run while config.yml disables it."""
@@ -275,6 +297,7 @@ class BotHandlers:
             dm_sent = False
             text += f"\n\n{username}, please start a conversation with the bot to configure your print settings:"
             reply_markup = ui.start_dm_keyboard(context.bot.username, printer_num)
+        reply_markup = self._claimed_keyboard(printer_num, user_id, reply_markup)
 
         try:
             await context.bot.edit_message_text(chat_id=session.chat_id, message_id=session.message_id,
@@ -282,6 +305,12 @@ class BotHandlers:
         except Exception as e:
             print(f'Could not update main chat message for Printer {printer_num} claim: {e}')
         return dm_sent
+
+    def _claimed_keyboard(self, printer_num: int, claimer_id: int, keyboard=None):
+        """A claimed print's main chat keyboard, with the "Report ruined print" button unless disabled."""
+        if self.settings.is_disabled("ruined_report"):
+            return keyboard
+        return ui.with_ruined_button(printer_num, claimer_id, keyboard)
 
     async def _unclaim(self, context: ContextTypes.DEFAULT_TYPE, printer_num: int) -> str:
         """Unclaim a print, restore the Claim button in the main chat and return a reply text."""
@@ -337,6 +366,7 @@ class BotHandlers:
                 chat_id=session.chat_id,
                 message_id=session.message_id,
                 text=ui.claimed_text(printer_num, session),
+                reply_markup=self._claimed_keyboard(printer_num, user.id),
             )
         except Exception as e:
             print(f'Exception: could not edit main chat message {session.message_id} on /start deep link: {e}')
@@ -1116,7 +1146,16 @@ class BotHandlers:
             return
 
         key, raw = args[1].lower(), args[2]
-        if key == "update_interval":
+        if key == "ruined_report_timeout":
+            try:
+                value = float(raw)
+            except ValueError:
+                value = 0
+            if not math.isfinite(value) or value <= 0:
+                await reply("ruined_report_timeout must be a positive number of seconds.")
+                return
+            value = int(value) if value.is_integer() else value
+        elif key == "update_interval":
             try:
                 value = float(raw)
             except ValueError:
@@ -1334,6 +1373,83 @@ class BotHandlers:
                                   caption=f"Camera image from Printer {printer_num} (updated {time.strftime('%H:%M:%S')})"),
             reply_markup=query.message.reply_markup,
         )
+
+    async def cb_report_ruined(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Ask the presser what's wrong with a claimed print. Their reply is passed on to the claimer."""
+        query = update.callback_query
+        if self.settings.is_disabled("ruined_report"):
+            await query.answer("Reporting ruined prints is disabled on this bot.", show_alert=True)
+            return
+        printer_num, claimer = _parse_callback(query)
+        if printer_num in self._ruined_questions:
+            await query.answer(f"Someone is already reporting Printer {printer_num}'s print.", show_alert=True)
+            return
+        presser = query.from_user
+        # Reserve the printer before sending, since updates are handled concurrently
+        pending = _RuinedQuestion(printer_num, int(claimer), presser.id)
+        self._ruined_questions[printer_num] = pending
+        await query.answer()
+
+        # ForceReply(selective) only opens the reply for users mentioned in the text
+        name = html.escape(_mention(presser))
+        mention = name if presser.username else f'<a href="tg://user?id={presser.id}">{name}</a>'
+        try:
+            question = await query.message.reply_text(
+                f"{mention}, what's wrong with Printer {printer_num}'s print? Reply to this message with the cause.",
+                parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
+        except Exception as e:
+            del self._ruined_questions[printer_num]
+            print(f'Could not ask about ruined Printer {printer_num}: {e}')
+            return
+        pending.chat_id, pending.message_id = question.chat_id, question.message_id
+        pending.timeout = asyncio.create_task(self._expire_ruined_question(pending))
+
+    async def _expire_ruined_question(self, pending: _RuinedQuestion):
+        """Delete an unanswered question after ruined_report_timeout, without telling the claimer."""
+        await asyncio.sleep(self.settings.ruined_report_timeout)
+        if self._ruined_questions.get(pending.printer_num) is pending:
+            del self._ruined_questions[pending.printer_num]
+            await self.ms._delete(pending.chat_id, pending.message_id)
+
+    async def on_ruined_reply(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Pass the presser's reply to a ruined print question on to the claimer. Other replies are ignored."""
+        message = update.effective_message
+        reply_to = getattr(message, "reply_to_message", None)
+        if not reply_to or not update.effective_user:
+            return
+        pending = next((q for q in self._ruined_questions.values()
+                        if q.message_id == reply_to.message_id and q.chat_id == message.chat_id), None)
+        if not pending or pending.presser_id != update.effective_user.id:
+            return
+        del self._ruined_questions[pending.printer_num]
+        pending.timeout.cancel()
+
+        printer_num = pending.printer_num
+        cause = (message.text or message.caption or "").strip() or "no cause given"
+        session = self.storage.get_print(printer_num)
+        if not session or session.claimed_by != pending.claimer_id:
+            # Failure messages keep the button after the session has ended
+            session = PrintSession(0, message.chat_id, printer_num, claimed_by=pending.claimer_id,
+                                   claimed_username=self.storage.display_name(pending.claimer_id))
+        presser = self.storage.display_name(pending.presser_id)
+        try:
+            await self.ms.send_ruined_report(
+                session, f"⚠️ {presser} reports your print on Printer {printer_num} is ruined: {cause}")
+            confirm = f"Thanks, {session.claimed_username} has been told about Printer {printer_num}."
+        except Exception as e:
+            print(f'Failed to send ruined print report for Printer {printer_num}: {e}')
+            confirm = f"Couldn't reach {session.claimed_username} about Printer {printer_num}."
+        await self.ms.log_message(f"Ruined print: {presser} reported {session.claimed_username}'s print "
+                                  f"on Printer {printer_num}: {cause}")
+
+        # Keep the main chat clean: the question, the reply (needs delete rights) and, shortly, the confirmation
+        await self.ms._delete(pending.chat_id, pending.message_id)
+        await self.ms._delete(message.chat_id, message.message_id)
+        try:
+            sent = await message.reply_text(confirm, do_quote=False)
+            self.ms.delete_later(sent.chat_id, sent.message_id, RUINED_CONFIRM_TTL)
+        except Exception as e:
+            print(f'Could not confirm ruined print report for Printer {printer_num}: {e}')
 
     async def cb_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query

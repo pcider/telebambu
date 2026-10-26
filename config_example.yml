@@ -18,8 +18,10 @@ log_chat_id: '1234567890'          # Chat for logs, or null to disable
 update_interval: 3          # seconds between printer polls (owner can change with /config)
 stats_log_interval: 3600    # seconds between update timing/status reports, or null to disable
 auto_restart_printers: true # false to only log idle printers with no camera instead of rebooting them
+ruined_report_timeout: 10   # seconds to wait for the cause after "Report ruined print" (owner can change with /config)
 
-# Set a command to true to turn it off. A disabled /staff also leaves the owner as the
+# Set a command to true to turn it off (ruined_report is the "Report ruined print" button).
+# A disabled /staff also leaves the owner as the
 # only role: admins and mods are treated as users until it is turned back on.
 # (/forceunclaim can't be turned off, so admins can still free up a printer.)
 disabled_commands:
@@ -31,6 +33,7 @@ disabled_commands:
   restart: false
   restartall: false
   home: false
+  ruined_report: false
 
 # Printers by number. Admins can manage these with /printer.
 printers:

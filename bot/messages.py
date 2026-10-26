@@ -37,6 +37,8 @@ class MessageService:
         self._background_tasks: set[asyncio.Task] = set()
         # Claimers whose DM Telegram refused; their notifications go to the main chat until they /start
         self._dm_unreachable: set[int] = set()
+        # Whether main chat messages about claimed prints get a "Report ruined print" button
+        self.ruined_button = True
 
     # --- Low-level helpers ---
 
@@ -96,6 +98,14 @@ class MessageService:
             await self.bot.delete_message(chat_id=chat_id, message_id=message_id)
         except Exception:
             pass  # Message may have already been deleted
+
+    def delete_later(self, chat_id, message_id: int, delay: float):
+        """Delete a message after a delay, in the background."""
+        async def _delete_later():
+            await asyncio.sleep(delay)
+            await self._delete(chat_id, message_id)
+
+        self._spawn(_delete_later())
 
     async def _delete_started_message(self, session: PrintSession | None):
         """Remove a print's "started printing" message to prevent spam."""
@@ -190,7 +200,10 @@ class MessageService:
                 if label == 'claimer' and thread_id is None and session.dm_preference == 'dm':
                     msg = await self._send_claimer_dm(session, message, image)
                 else:
-                    msg = await self._send(chat_id, message, image, thread_id)
+                    # In the main chat, anyone who sees it go wrong can tell the claimer more
+                    keyboard = (ui.with_ruined_button(printer_num, session.claimed_by)
+                                if label == 'claimer' and self.ruined_button else None)
+                    msg = await self._send(chat_id, message, image, thread_id, keyboard)
                 if msg:
                     sent_messages.append((msg.chat_id, msg.message_id))
             except Exception as e:
@@ -229,6 +242,11 @@ class MessageService:
             except Exception as e:
                 print(f'Failed to notify claimer of Printer {printer_num}: {e}')
             await self._notify_watchers(session, message, image)
+
+    async def send_ruined_report(self, session: PrintSession, message: str):
+        """Tell a claimer their print is ruined, in the main chat if their DM is refused.
+        The session may already have ended (reports on failure messages)."""
+        return await self._send_claimer_dm(session, message)
 
     async def send_layer2_notification(self, printer_num: int, image: bytes | None = None):
         await self._notify_claimer(

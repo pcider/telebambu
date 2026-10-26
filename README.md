@@ -60,7 +60,8 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    Upgrading from `config.py`? Start the bot once without a `config.yml` and it will create one
    from your `config.py`, which can then be deleted.
 
-   The owner can change `chat_id`, `status_chat_id`, `log_chat_id` and `update_interval` at runtime
+   The owner can change `chat_id`, `status_chat_id`, `log_chat_id`, `update_interval` and
+   `ruined_report_timeout` at runtime
    with `/config`. The bot rewrites `config.yml` when settings change, so hand-written comments
    are not kept.
 
@@ -71,7 +72,8 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    `update_interval` in `config.yml` by hand, and start it again.
 
    `disabled_commands` turns individual commands off: set `print`, `speed`, `skip`, `staff`,
-   `forcereclaim`, `restart`, `restartall` or `home` to `true`. Disabled commands are hidden from
+   `forcereclaim`, `restart`, `restartall`, `home` or `ruined_report` (the "Report ruined print"
+   button) to `true`. Disabled commands are hidden from
    `/help` and the command menu and reply that they are disabled. `staff: true` also leaves the
    owner as the only role: admins and mods are treated as ordinary users, but their roles stay in
    `data.json` and come back when `staff` is set to `false` again.
@@ -181,7 +183,8 @@ sudo systemctl start telebambu
 **Owner**
 - `/staff edit <admin|mod|user> <user>` - Add or remove admins and mods
 - `/staff edit owner <user>` - Transfer ownership (asks for confirmation; you become an admin)
-- `/config` / `/config set <key> <value>` - Change `chat_id`, `status_chat_id`, `log_chat_id` or `update_interval`
+- `/config` / `/config set <key> <value>` - Change `chat_id`, `status_chat_id`, `log_chat_id`, `update_interval`
+  or `ruined_report_timeout`
 
 Role changes, force reclaims, restarts and printer/config changes are posted to the log chat.
 Mods have no extra permissions yet.
@@ -193,6 +196,14 @@ When a print starts, the bot sends a message with a **Claim Print** button. Clai
 - Choose between chat or DM delivery
 - Enable/disable Layer 2 progress notifications
 - Access the printer's camera, with a Refresh button on images in your DM
+
+A claimed print's main chat message (and its failure/cancel message, when that goes to the main chat)
+has a **⚠️ Report ruined print** button, so anyone at the lab who sees spaghetti or a detached print can
+tell the claimer. The bot asks the presser for the cause; their reply is sent to the claimer's DM (or the
+main chat if the DM is refused) and posted to the log chat. The question, the reply and the bot's short
+confirmation are then deleted to keep the main chat clean (deleting the reply needs delete rights).
+Unanswered questions are deleted after `ruined_report_timeout` seconds (default 10) without telling the
+claimer. One question per printer at a time; pending questions are lost on restart.
 
 ## Project Structure
 

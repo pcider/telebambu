@@ -23,9 +23,11 @@ HEADER = """\
 """
 
 
-# Commands that config.yml can turn off one by one. A disabled /staff also leaves the owner
-# as the only role: admins and mods act as users until it is turned back on.
-DISABLEABLE_COMMANDS = ('print', 'speed', 'skip', 'staff', 'forcereclaim', 'restart', 'restartall', 'home')
+# Commands that config.yml can turn off one by one ('ruined_report' is the "Report ruined print"
+# button, not a command). A disabled /staff also leaves the owner as the only role: admins and
+# mods act as users until it is turned back on.
+DISABLEABLE_COMMANDS = ('print', 'speed', 'skip', 'staff', 'forcereclaim', 'restart', 'restartall', 'home',
+                       'ruined_report')
 
 
 @dataclass
@@ -46,6 +48,8 @@ class Settings:
     update_interval: float = 5
     stats_log_interval: Optional[float] = 60 * 60
     auto_restart_printers: bool = True
+    # Seconds a "Report ruined print" question waits for the presser's reply before it is deleted
+    ruined_report_timeout: float = 10
     # One flag per command in DISABLEABLE_COMMANDS; true turns that command off
     disabled_commands: dict[str, bool] = field(default_factory=lambda: dict.fromkeys(DISABLEABLE_COMMANDS, False))
     printers: dict[int, PrinterConfig] = field(default_factory=dict)
@@ -69,7 +73,7 @@ class Settings:
 
 
 # Settings that may be left out of config.yml (or config.py, in upper case) to use the default
-OPTIONAL_KEYS = ('update_interval', 'stats_log_interval', 'auto_restart_printers')
+OPTIONAL_KEYS = ('update_interval', 'stats_log_interval', 'auto_restart_printers', 'ruined_report_timeout')
 
 
 def _chat(value) -> Optional[str]:
