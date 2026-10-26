@@ -1,6 +1,6 @@
 # TODO
 
-Last reviewed 2026-10-23. Items marked **(ask Max first)** need a design decision before any code.
+Last reviewed 2026-10-26. Items marked **(ask Max first)** need a design decision before any code.
 
 ## How to ship changes
 
@@ -23,18 +23,21 @@ Last reviewed 2026-10-23. Items marked **(ask Max first)** need a design decisio
 - [ ] Test `/upload <printer> force` on a real printer while it's printing. Check that writing to
       the SD card mid-print doesn't disturb the print. Without `force`, `/upload` refuses while
       RUNNING, PAUSE or PREPARE.
-- [ ] Set up CI/CD for prod on the OpenWrt router. `docs/openwrt-ci-cd.md` has setup notes, but none
-      of it is set up yet. That includes pinning `requirements.txt`, including the `bambulabs_api`
-      commit.
+- [ ] CI/CD: branch `ci/openwrt-deploy` (`5df9dec`) adds GitHub Actions CI and a pull-based
+      deploy for the router (procd service, cron deploy script with a CI check, venv switch and
+      rollback). See `deploy/openwrt/README.md` on that branch. CI must be on `prod` before the
+      cron deploy runs. The router steps need Max: install Python, git and curl, switch to procd,
+      set up the cron line, then pin `requirements.txt` from `pip freeze` on the router.
 - [ ] Optional: make plain `git push` work. SSH to GitHub hangs on this network, and HTTPS through
       `gh` works. Run `gh auth setup-git` and set a global `url."https://github.com/".insteadOf
       git@github.com:`.
 
 ## Bugs
 
-- [ ] "Filament is running low" bug. No details recorded yet: get the symptom or a log excerpt from
-      Max. The check is `PrinterMonitor._check_low_filament` (`printers/monitor.py`). It alerts once
-      per tray when the active tray's `remain` is 0–10%. `remain` is -1 when the printer can't tell.
+- [ ] "Filament is running low" bug: alerts fire when the spool isn't low. `fix/low-filament-alert`
+      (`fb02ef3`) mutes them (`low_filament_alerts: false`) and logs each match with the raw tray
+      report. Debug with Max: compare those log lines with the real spools (suspect `remain` = 0
+      for non-RFID or unknown spools), then fix and turn the alert back on.
 - [ ] `/print` (`BotHandlers._print_document` in `bot/handlers.py`): the Telegram file download
       (`get_file` / `download_as_bytearray`) isn't inside a `try`. If it fails (network error, or
       `file_size` is missing so the 20 MB check is skipped), the exception escapes the handler and
@@ -55,58 +58,43 @@ Last reviewed 2026-10-23. Items marked **(ask Max first)** need a design decisio
 - [ ] `_CameraRetryNoiseFilter` drops every camera `Error occurred: timed out` record, so a camera
       that stays down is never logged. Log it once per outage, or rate-limit it.
 
-## Features
+## Features (built 2026-10-26, waiting for review)
 
-- [ ] **Keep the main chat quiet.** Settings and notification commands should only work in DMs, and
-      users shouldn't be able to run commands in the main IMBS supergroup.
-      Today every command works in any chat; the only check is the one that deletes `/printer`
-      messages containing access codes from groups.
-      Overlaps with the channel whitelist below, so plan the two together.
-- [ ] **Claim by DM.** Replace the inline "Claim Print" button, which claims straight away, with a
-      button that opens a DM with the bot. The user then sends `/claim <printer>` there themselves.
-      Today it's `ui.claim_keyboard` (a callback) plus `ui.start_dm_keyboard` (a `/start claim-N`
-      deep link).
-- [ ] **Anonymous prints (opt-in).** Claimers can set a default, stored in their user preferences
-      next to `default_dm_preference`, so their name isn't announced in the main chat. Names are
-      still shown by default. For a claimer who opted in, enforce the boundary strictly:
-      - Their name must not appear anywhere other users can see it. That covers main chat messages
-        (claimed, finished, failed, the status message), `/info` and other replies in groups, and
-        buttons.
-      - Only the log chat shows who claimed the print.
-      - Enforce it in one place, e.g. a single display helper used by every message outside the
-        log chat, not at each call site.
-      - Add a test that fails if an anonymous claimer's name reaches the main chat.
+Each is one commit off `prod` (`cfec73c`) on its own branch, with tests, so it can be cherry-picked
+alone. `integration/2026-10-26` (`91f5e1c`) merges all of them plus `fix/low-filament-alert` with
+the conflicts and cross-feature interactions resolved (153 tests pass). Nothing has been tried
+against real Telegram or printers yet. Suggested path: deploy `integration/2026-10-26` to staging,
+test it live, then merge into `prod`.
 
-      Places that show the name today include "Printer N has finished printing. (@user)" and the
-      "DM unavailable" note.
-- [ ] **Log print start/finish and claims/unclaims to the log chat.** Today only pause/resume,
-      `/speed`, `/skip`, `/stop_at`, force reclaim/unclaim, restarts, `/home`, `/print`, `/upload`,
-      role, config and printer changes are logged. Ordinary claims, unclaims, starts and finishes
-      aren't.
-- [ ] **Easter egg: `/beep <printer>`** makes an IDLE or FINISH printer beep.
-- [ ] **Latency check.** If a printer's last update is more than 10 s old, log it. Today there's
-      only the periodic stats report (`stats_log_interval`), with min/avg/max time between ticks.
-- [ ] **Log every command per user**, behind a configurable flag.
-- [ ] **Channel whitelist (ask Max first).** Limit the chats where the bot answers commands. Plan
-      what makes sense with Max before building.
-- [ ] **Auto-delete long informational replies (ask Max first).** Delete `/help`, `/info` and
-      similar replies after 60 s. Plan with Max first.
-- [ ] **`/reportbug` and `/suggestfeature`** post the user's message to a configured chat.
-- [ ] **Configure everything through the bot.** The owner should be able to set every channel and
-      setting with commands. Today `/config set` covers `chat_id`, `status_chat_id`, `log_chat_id`
-      and `update_interval`. It doesn't cover `stats_log_interval`, `auto_restart_printers`,
-      `disabled_commands`, or chats for any new features such as bug reports.
-- [ ] **Bed cool-down notification.** Tell the claimer when the bed has cooled to a temperature
-      that suits the loaded or reported filament, so the print can be removed.
-- [ ] **"Your print failed" button.** Anyone can press it to notify the claimer that their print is
-      ruined, mainly for paused or cancelled prints. The bot asks the presser, in the main chat, to
-      reply with the cause. It deletes the question once they reply, or after a configurable
-      timeout (default 10 s). The question must tell them to reply.
-- [ ] **Remind someone when a print is done.** A command, either reused `/notify` or a new
-      `/queue`, that lets anyone ask to be DMed when a printer's current print finishes. It
-      shouldn't become a queue or booking system.
-      `/notify_user` partly covers this, but only the claimer or an existing watcher can add people,
-      and only to a claimed print.
+- [ ] `feat/dm-only-commands` (`95f0c05`): commands only work in DMs and in the status/log chats
+      plus `command_chats` (`/config allowhere|denyhere`). In other groups the command is deleted
+      and the user is DMed a hint. Flag `dm_only_commands` (default on). Max chose this design.
+      Follow-up: the command menu still shows in every chat.
+- [ ] `feat/claim-by-dm` (`4faa4b5`): "Claim in DM" URL button; `/start claim-N` tells the user to
+      send `/claim N`. Old callback buttons just open the DM.
+- [ ] `feat/anonymous-prints` (`c808a12`): `/anonymous on|off` plus a settings button. One helper,
+      `ui.public_claimer_name`, with a leak test.
+- [ ] `feat/log-print-events` (`cbda6fd`): start/finish/fail and claim/unclaim lines in the log chat.
+- [ ] `feat/beep` (`49758b5`): `/beep <printer>` (IDLE/FINISH, 30 s cooldown). Check on a real
+      printer that the `M1006` buzzer G-code actually plays.
+- [ ] `feat/latency-log` (`b81c957`): logs when a printer has sent no MQTT message for more than
+      `latency_warn_seconds` (default 10), and again when it recovers. Also logs slow monitor ticks.
+      Watch for idle printers that go quiet for 10 s and cause noise.
+- [ ] `feat/command-log` (`d8bc228`): `log_commands` flag (default off). `/printer` arguments are
+      redacted.
+- [ ] `feat/autodelete-info-replies` (`ee50e5c`): informational replies in groups are deleted after
+      `info_reply_ttl` (default 60 s). DMs are never deleted. Max chose this design.
+- [ ] `feat/feedback-commands` (`cc41ea4`): `/reportbug` and `/suggestfeature` post to
+      `feedback_chat_id`, or the log chat if that isn't set.
+- [ ] `feat/config-everything` (`9ebf082`): table-driven `/config` that covers every setting,
+      `/config here`, and `/config disable|enable <command>`.
+- [ ] `feat/bed-cooldown` (`4bbb473`): DMs the claimer once the bed reaches the filament's removal
+      temperature (PLA 35, PETG 40, ABS/ASA 50, PC 60, default 40). There's an opt-out button.
+- [ ] `feat/print-ruined-button` (`605e36c`): "Report ruined print" button on claimed prints. Asks
+      the presser for the cause in the main chat; times out after `ruined_report_timeout`
+      (default 10 s).
+- [ ] `feat/notify-when-done` (`f92a22e`): `/queue <printer>` and `/unqueue`. A one-shot DM when
+      the printer becomes free; not a booking system.
 
 ## Housekeeping
 
