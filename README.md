@@ -60,7 +60,7 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    Upgrading from `config.py`? Start the bot once without a `config.yml` and it will create one
    from your `config.py`, which can then be deleted.
 
-   The owner can change `chat_id`, `status_chat_id`, `log_chat_id` and `update_interval` at runtime
+   The owner can change `chat_id`, `status_chat_id`, `log_chat_id`, `update_interval` and `info_reply_ttl` at runtime
    with `/config`. The bot rewrites `config.yml` when settings change, so hand-written comments
    are not kept.
 
@@ -69,6 +69,13 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    `/config` doesn't help, because the monitor is already waiting out the old interval, and the value is
    saved to `config.yml`, so it also survives restarts. To undo it, stop the bot, change
    `update_interval` in `config.yml` by hand, and start it again.
+
+   `info_reply_ttl` (default 60) is how many seconds the bot's replies to informational commands
+   stay in group chats: `/help`, `/info`, `/camera`, `/config`, `/staff [list]`, `/printer list`,
+   `/notify_user <printer>`, `/skip [printer]` and `/speed`. The command message is deleted along
+   with them (if the bot may delete messages there). Replies in DMs are never deleted. Use
+   `/config set info_reply_ttl off` (or `null` in `config.yml`) to keep them. Pending deletions are
+   held in memory, so messages waiting when the bot restarts are not deleted.
 
    `disabled_commands` turns individual commands off: set `print`, `speed`, `skip`, `staff`,
    `forcereclaim`, `restart`, `restartall` or `home` to `true`. Disabled commands are hidden from
@@ -181,7 +188,7 @@ sudo systemctl start telebambu
 **Owner**
 - `/staff edit <admin|mod|user> <user>` - Add or remove admins and mods
 - `/staff edit owner <user>` - Transfer ownership (asks for confirmation; you become an admin)
-- `/config` / `/config set <key> <value>` - Change `chat_id`, `status_chat_id`, `log_chat_id` or `update_interval`
+- `/config` / `/config set <key> <value>` - Change `chat_id`, `status_chat_id`, `log_chat_id`, `update_interval` or `info_reply_ttl` (seconds, or `off`)
 
 Role changes, force reclaims, restarts and printer/config changes are posted to the log chat.
 Mods have no extra permissions yet.

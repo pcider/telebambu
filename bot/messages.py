@@ -108,6 +108,16 @@ class MessageService:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
+    def delete_later(self, messages: list[tuple[int, int]], delay: float):
+        """Delete (chat_id, message_id) pairs after a delay. Pending deletes are kept in memory
+        only, so a restart drops them and those messages stay."""
+        async def _delete_later():
+            await asyncio.sleep(delay)
+            for chat_id, msg_id in messages:
+                await self._delete(chat_id, msg_id)
+
+        self._spawn(_delete_later())
+
     # --- Print lifecycle ---
 
     async def send_print_started(self, printer_num: int, print_time: str, total_layers: int = 0,

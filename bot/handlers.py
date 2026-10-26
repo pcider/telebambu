@@ -22,10 +22,27 @@ from settings import DISABLEABLE_COMMANDS, PrinterConfig, Settings
 
 NOTIFY_USAGE = "Usage: /notify [printer] <layer> or /notify [printer] <percent>%"
 NOTIFY_EVERY_USAGE = "Usage: /notify_every [printer] layers <number>, time <minutes>, percent <number>, or off"
-CONFIG_USAGE = "Usage: /config or /config set <chat_id|status_chat_id|log_chat_id|update_interval> <value>"
+CONFIG_USAGE = ("Usage: /config or /config set "
+                "<chat_id|status_chat_id|log_chat_id|update_interval|info_reply_ttl> <value>")
 # Settings the owner can change at runtime; chat targets are 'chat_id' or 'chat_id/thread_id'
-CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "update_interval")
+CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "update_interval", "info_reply_ttl")
 MIN_UPDATE_INTERVAL = 1  # seconds
+# Read-only command uses whose group replies are deleted after info_reply_ttl, with the command.
+# Words after the name match the arguments (any case): "*" is any one argument, a final "..."
+# allows any further ones, and otherwise the argument count must match.
+INFO_COMMANDS = frozenset({
+    "help ...",
+    "info ...",
+    "camera ...",
+    "staff",
+    "staff list ...",
+    "config",
+    "printer list ...",
+    "notify_user *",  # lists the print's watchers
+    "skip",
+    "skip *",  # lists the plate's objects
+    "speed",  # shows the current speed
+})
 PRINTER_USAGE = (
     "Usage:\n"
     "/printer list\n"
@@ -89,6 +106,58 @@ def _replied_to(message):
     return reply_to
 
 
+def _is_info_command(name: str, args: list[str], message) -> bool:
+    """Whether this use of a command only shows information (see INFO_COMMANDS)."""
+    if name == "notify_user" and _replied_to(message):
+        return False  # Adds the replied-to user
+    words = [name] + [arg.lower() for arg in args]
+    for pattern in INFO_COMMANDS:
+        parts = pattern.split()
+        rest = parts[-1] == "..."
+        if rest:
+            parts.pop()
+        if len(words) < len(parts) or (not rest and len(words) != len(parts)):
+            continue
+        if all(part in ("*", word) for part, word in zip(parts, words)):
+            return True
+    return False
+
+
+def _valid_ttl(value) -> bool:
+    """info_reply_ttl must be a positive, finite number of seconds; anything else turns it off."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value < math.inf
+
+
+class _RecordingMessage:
+    """A command message whose reply_* methods also note the bot's replies in ``sent``."""
+
+    def __init__(self, message, sent: list):
+        self._message = message
+        self._sent = sent
+
+    def __getattr__(self, name):
+        attr = getattr(self._message, name)
+        if not name.startswith("reply_") or not callable(attr):
+            return attr
+
+        async def reply(*args, **kwargs):
+            result = await attr(*args, **kwargs)
+            self._sent.extend(result if isinstance(result, (list, tuple)) else [result])
+            return result
+        return reply
+
+
+class _RecordingUpdate:
+    """An update passed to a command handler so the replies it sends can be found afterwards."""
+
+    def __init__(self, update: Update, sent: list):
+        self._update = update
+        self.effective_message = _RecordingMessage(update.effective_message, sent)
+
+    def __getattr__(self, name):
+        return getattr(self._update, name)
+
+
 class BotHandlers:
     def __init__(self, storage: Storage, message_service: MessageService, printer_manager: PrinterManager,
                  settings: Settings):
@@ -127,9 +196,12 @@ class BotHandlers:
             "config": self.cmd_config,
             "printer": self.cmd_printer,
         }
+        info_names = {pattern.split()[0] for pattern in INFO_COMMANDS}
         for name, callback in commands.items():
             if name in DISABLEABLE_COMMANDS:
                 callback = self._unless_disabled(name, callback)
+            if name in info_names:
+                callback = self._autodelete_info(name, callback)
             app.add_handler(CommandHandler(name, callback))
         # Commands in a document's caption don't reach CommandHandler
         app.add_handler(MessageHandler(filters.Document.ALL & filters.CaptionRegex(r"^/print(@\w+)?(\s|$)"),
@@ -154,6 +226,27 @@ class BotHandlers:
                 return
             await callback(update, context)
         return guarded
+
+    def _autodelete_info(self, name: str, callback):
+        """Wrap a command so its read-only uses (INFO_COMMANDS) in group chats have the command and
+        the bot's replies deleted after info_reply_ttl seconds. Replies in DMs are kept."""
+        async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            message = update.effective_message
+            ttl = self.settings.info_reply_ttl
+            if (not message or message.chat.type == "private" or not _valid_ttl(ttl)
+                    or not _is_info_command(name, context.args or [], message)):
+                await callback(update, context)
+                return
+            sent = []
+            try:
+                await callback(_RecordingUpdate(update, sent), context)
+            finally:
+                # Failures (e.g. no delete rights) are ignored. Pending deletes are in memory only,
+                # so a restart drops them and those messages stay.
+                targets = [(message.chat_id, message.message_id)]
+                targets += [(m.chat_id, m.message_id) for m in sent if m]
+                self.ms.delete_later(targets, ttl)
+        return wrapped
 
     # --- Users & roles ---
 
@@ -1126,6 +1219,18 @@ class BotHandlers:
                 await reply(f"update_interval must be a number of seconds, at least {MIN_UPDATE_INTERVAL}.")
                 return
             value = int(value) if value.is_integer() else value
+        elif key == "info_reply_ttl":
+            if raw.lower() in ("none", "off"):
+                value = None
+            else:
+                try:
+                    value = float(raw)
+                except ValueError:
+                    value = 0
+                if not _valid_ttl(value):
+                    await reply("info_reply_ttl must be a positive number of seconds, or off.")
+                    return
+                value = int(value) if value.is_integer() else value
         elif key == "log_chat_id" and raw.lower() in ("none", "off"):
             value = None
         else:

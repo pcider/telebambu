@@ -18,7 +18,8 @@ HEADER = """\
 #
 # Chat targets are 'chat_id' or 'chat_id/thread_id' for forum topics.
 # log_chat_id: null disables the log chat. stats_log_interval: null disables
-# the periodic update timing report. owner_id seeds the owner role on first
+# the periodic update timing report. info_reply_ttl: seconds before replies to
+# informational commands in groups are deleted, or null to keep them. owner_id seeds the owner role on first
 # run; after that roles live in data.json and change through /staff.
 """
 
@@ -46,6 +47,8 @@ class Settings:
     update_interval: float = 5
     stats_log_interval: Optional[float] = 60 * 60
     auto_restart_printers: bool = True
+    # Seconds before group replies to informational commands (and the commands) are deleted; None keeps them
+    info_reply_ttl: Optional[float] = 60
     # One flag per command in DISABLEABLE_COMMANDS; true turns that command off
     disabled_commands: dict[str, bool] = field(default_factory=lambda: dict.fromkeys(DISABLEABLE_COMMANDS, False))
     printers: dict[int, PrinterConfig] = field(default_factory=dict)
@@ -69,7 +72,7 @@ class Settings:
 
 
 # Settings that may be left out of config.yml (or config.py, in upper case) to use the default
-OPTIONAL_KEYS = ('update_interval', 'stats_log_interval', 'auto_restart_printers')
+OPTIONAL_KEYS = ('update_interval', 'stats_log_interval', 'auto_restart_printers', 'info_reply_ttl')
 
 
 def _chat(value) -> Optional[str]:
