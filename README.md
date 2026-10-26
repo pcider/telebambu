@@ -64,8 +64,9 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    and the printers (use `/printer`) at runtime with `/config`, and changes take effect without a
    restart. The bot rewrites `config.yml` when settings change, so hand-written comments are not kept.
    - `/config set <key> <value>` for `chat_id`, `status_chat_id`, `log_chat_id` (`none` turns the
-     log chat off), `update_interval`, `stats_log_interval` (`none` turns the report off) and
-     `auto_restart_printers` and `low_filament_alerts` (`true`/`false`).
+     log chat off), `update_interval`, `stats_log_interval` (`none` turns the report off),
+     `latency_warn_seconds` (`off` turns it off), and `auto_restart_printers` and
+     `low_filament_alerts` (`true`/`false`).
    - `thread_id`, `status_thread_id` and `log_thread_id` set just the topic of those chats
      (`none` for no topic).
    - `/config here <chat_id|status_chat_id|log_chat_id>`, sent in the target chat or forum topic,
@@ -79,6 +80,12 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    `/config` doesn't help, because the monitor is already waiting out the old interval, and the value is
    saved to `config.yml`, so it also survives restarts. To undo it, stop the bot, change
    `update_interval` in `config.yml` by hand, and start it again.
+
+   `latency_warn_seconds` (default 10) logs a line to the log chat when a connected printer has sent
+   no MQTT message for that long ("Printer 3: no update for 12.3 s"), and once more when messages
+   resume, with the length of the gap. It also logs any printer poll that takes longer than that.
+   Offline printers are left to the usual "unreachable" message. `/config set latency_warn_seconds off`
+   (or `null` in `config.yml`) turns it off.
 
    `disabled_commands` turns individual commands off: set `print`, `speed`, `skip`, `staff`,
    `forcereclaim`, `restart`, `restartall` or `home` to `true`. Disabled commands are hidden from
@@ -192,7 +199,7 @@ sudo systemctl start telebambu
 **Owner**
 - `/staff edit <admin|mod|user> <user>` - Add or remove admins and mods
 - `/staff edit owner <user>` - Transfer ownership (asks for confirmation; you become an admin)
-- `/config` / `/config set <key> <value>` - Show or change settings (chats, topics, intervals, `auto_restart_printers`, `low_filament_alerts`)
+- `/config` / `/config set <key> <value>` - Show or change settings (chats, topics, intervals, `latency_warn_seconds`, `auto_restart_printers`, `low_filament_alerts`)
 - `/config here <chat_id|status_chat_id|log_chat_id>` - Point that chat target at the chat and topic the command is sent in
 - `/config disable <command>` / `/config enable <command>` - Turn a command off or on
 

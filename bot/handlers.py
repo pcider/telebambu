@@ -76,6 +76,18 @@ def _parse_stats_log_interval(raw: str) -> float | None:
     return _seconds(value)
 
 
+def _parse_latency_warn_seconds(raw: str) -> float | None:
+    if raw.lower() in OFF_VALUES:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0
+    if not 0 < value < math.inf:  # also rejects nan
+        raise ValueError("latency_warn_seconds must be a positive number of seconds, or off.")
+    return _seconds(value)
+
+
 def _parse_bool(raw: str) -> bool:
     value = raw.lower()
     if value in ("true", "on", "yes", "1"):
@@ -104,6 +116,7 @@ CONFIG_KEYS = {
     "log_thread_id": ConfigKey(_parse_thread, target="log_chat_id"),
     "update_interval": ConfigKey(_parse_update_interval),
     "stats_log_interval": ConfigKey(_parse_stats_log_interval),
+    "latency_warn_seconds": ConfigKey(_parse_latency_warn_seconds),
     "auto_restart_printers": ConfigKey(_parse_bool),
     "low_filament_alerts": ConfigKey(_parse_bool),
 }

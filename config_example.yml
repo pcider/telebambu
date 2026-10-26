@@ -20,6 +20,7 @@ log_chat_id: '1234567890'          # Chat for logs, or null to disable
 # The owner can change these with /config set <key> <value>.
 update_interval: 3          # seconds between printer polls
 stats_log_interval: 3600    # seconds between update timing/status reports, or null to disable
+latency_warn_seconds: 10    # log when a printer sends no update (or a poll takes) this long, or null to disable
 auto_restart_printers: true # false to only log idle printers with no camera instead of rebooting them
 low_filament_alerts: false  # true to warn claimers of low filament; false only logs what would have been sent
 
