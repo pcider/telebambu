@@ -100,7 +100,7 @@ class RuinedReport(unittest.IsolatedAsyncioTestCase):
         self.assertIn('spaghetti everywhere', self.ms.log_message.call_args.args[0])
         deleted = {c.kwargs['message_id'] for c in self.bot.delete_message.call_args_list}
         self.assertEqual(deleted, {500, 501})
-        self.ms.delete_later.assert_called_once_with(-100123, 502, 5)
+        self.ms.delete_later.assert_called_once_with([(-100123, 502)], 5)
         self.assertEqual(self.handlers._ruined_questions, {})
 
     async def test_refused_dm_falls_back_to_the_main_chat(self):

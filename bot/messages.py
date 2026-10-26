@@ -110,14 +110,6 @@ class MessageService:
         except Exception:
             pass  # Message may have already been deleted
 
-    def delete_later(self, chat_id, message_id: int, delay: float):
-        """Delete a message after a delay, in the background."""
-        async def _delete_later():
-            await asyncio.sleep(delay)
-            await self._delete(chat_id, message_id)
-
-        self._spawn(_delete_later())
-
     async def _delete_started_message(self, session: PrintSession | None):
         """Remove a print's "started printing" message to prevent spam."""
         if session:
@@ -128,6 +120,16 @@ class MessageService:
         task = asyncio.create_task(coro)
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
+
+    def delete_later(self, messages: list[tuple[int, int]], delay: float):
+        """Delete (chat_id, message_id) pairs after a delay. Pending deletes are kept in memory
+        only, so a restart drops them and those messages stay."""
+        async def _delete_later():
+            await asyncio.sleep(delay)
+            for chat_id, msg_id in messages:
+                await self._delete(chat_id, msg_id)
+
+        self._spawn(_delete_later())
 
     # --- Print lifecycle ---
 

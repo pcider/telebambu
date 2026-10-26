@@ -20,7 +20,8 @@ HEADER = """\
 # log_chat_id: null disables the log chat. feedback_chat_id: null sends
 # /reportbug and /suggestfeature to the log chat. stats_log_interval: null disables
 # the periodic update timing report. latency_warn_seconds: null disables the
-# stale printer / slow update warnings. owner_id seeds the owner role on first
+# stale printer / slow update warnings. info_reply_ttl: seconds before replies to
+# informational commands in groups are deleted, or null to keep them. owner_id seeds the owner role on first
 # run; after that roles live in data.json and change through /staff.
 """
 
@@ -63,6 +64,8 @@ class Settings:
     log_commands: bool = False
     # Seconds a "Report ruined print" question waits for the presser's reply before it is deleted
     ruined_report_timeout: float = 10
+    # Seconds before group replies to informational commands (and the commands) are deleted; None keeps them
+    info_reply_ttl: Optional[float] = 60
     # One flag per command in DISABLEABLE_COMMANDS; true turns that command off
     disabled_commands: dict[str, bool] = field(default_factory=lambda: dict.fromkeys(DISABLEABLE_COMMANDS, False))
     printers: dict[int, PrinterConfig] = field(default_factory=dict)
@@ -87,7 +90,8 @@ class Settings:
 
 # Settings that may be left out of config.yml (or config.py, in upper case) to use the default
 OPTIONAL_KEYS = ('update_interval', 'stats_log_interval', 'latency_warn_seconds', 'auto_restart_printers',
-                 'low_filament_alerts', 'log_commands', 'ruined_report_timeout')
+                 'low_filament_alerts', 'log_commands', 'ruined_report_timeout',
+                 'info_reply_ttl')
 
 
 def _chat(value) -> Optional[str]:

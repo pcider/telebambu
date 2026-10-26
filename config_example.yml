@@ -27,6 +27,8 @@ auto_restart_printers: true # false to only log idle printers with no camera ins
 low_filament_alerts: false  # true to warn claimers of low filament; false only logs what would have been sent
 log_commands: false         # true to post every command and button press to the log chat (owner can change with /config)
 ruined_report_timeout: 10   # seconds to wait for the cause after "Report ruined print" (owner can change with /config)
+info_reply_ttl: 60          # seconds before replies to /help, /info, /camera etc. in groups are deleted
+                            # (with the command), or null to keep them. DM replies are never deleted.
 
 # Set a command to true to turn it off (the owner can use /config disable|enable <command>).
 # ruined_report is the "Report ruined print" button.
