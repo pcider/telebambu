@@ -183,7 +183,8 @@ sudo systemctl start telebambu
 - `/staff edit owner <user>` - Transfer ownership (asks for confirmation; you become an admin)
 - `/config` / `/config set <key> <value>` - Change `chat_id`, `status_chat_id`, `log_chat_id` or `update_interval`
 
-Role changes, force reclaims, restarts and printer/config changes are posted to the log chat.
+Print starts, finishes, failures and cancels, claims and unclaims (with the user's Telegram id), role changes,
+force reclaims, restarts and printer/config changes are posted to the log chat.
 Mods have no extra permissions yet.
 
 ### Interactive Buttons

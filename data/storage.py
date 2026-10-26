@@ -22,6 +22,7 @@ class PrintSession:
     layer2_notify: bool = True
     layer2_notified: bool = False
     print_time: Optional[str] = None
+    started_at: Optional[float] = None  # when the bot saw the print start, for its duration in the log chat
     file_name: Optional[str] = None
     # Both names the printer reports, so a restart can tell whether it is still the same print
     subtask_name: Optional[str] = None
@@ -147,6 +148,8 @@ class Storage:
             chat_id=chat_id,
             printer_num=printer_num,
             print_time=print_time,
+            # Unknown for prints found already running at startup
+            started_at=None if catchup else time.time(),
             total_layers=total_layers,
             file_name=file_name,
             subtask_name=subtask_name,
@@ -191,6 +194,7 @@ class Storage:
             chat_id=session.chat_id,
             printer_num=printer_num,
             print_time=session.print_time,
+            started_at=session.started_at,
             total_layers=session.total_layers,
             file_name=session.file_name,
             subtask_name=session.subtask_name,
