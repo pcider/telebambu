@@ -10,6 +10,7 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
 - Live camera access to view printers
 - Layer 2 progress notifications
 - Filament run-out alerts to a print's claimer and anyone added with `/notify_user`. Low filament alerts (10% or less on the spool in use) are off by default (`low_filament_alerts: false`) because they gave false alarms; while off, each match is only logged to the log chat with the printer's raw tray report so it can be debugged. The owner turns them back on with `/config set low_filament_alerts true`
+- A DM to the claimer once a finished print's bed has cooled enough to remove it (threshold by filament: PLA/TPU 35 °C, PETG 40 °C, ABS/ASA/PA 50 °C, PC 60 °C, others 40 °C; gives up after 2 hours or when a new print starts; table in `printers/monitor.py`)
 - Persistent status message showing all printer states
 - Configurable notification preferences (chat or DM)
 - Opt-in anonymous prints: claimers can hide their name from other users (`/anonymous`)
@@ -229,6 +230,7 @@ which tells you to send `/claim <printer>` there; claiming in the DM makes sure 
 - Choose between chat or DM delivery
 - Enable/disable Layer 2 progress notifications
 - Turn anonymous on or off (same as `/anonymous`)
+- Enable/disable the bed cooled notification (your choice is remembered for later claims)
 - Access the printer's camera, with a Refresh button on images in your DM
 
 A claimed print's main chat message (and its failure/cancel message, when that goes to the main chat)

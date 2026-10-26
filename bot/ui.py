@@ -189,15 +189,18 @@ def settings_message(printer_num: int, session: PrintSession,
     destination = "main chat" if session.dm_preference == "chat" else "here privately"
     layer2_status = "ON" if session.layer2_notify else "OFF"
     anonymous_status = "ON" if session.anonymous else "OFF"
+    cooldown_status = "ON" if session.cooldown_notify else "OFF"
 
     text = (
         f"Settings for Printer {printer_num}:\n"
         f"- Finished image: {destination}\n"
         f"- Layer 2 notification: {layer2_status}\n"
+        f"- Bed cooled notification: {cooldown_status}\n"
         f"- Anonymous (name hidden from others): {anonymous_status}\n\n"
         f"You can use /camera {printer_num} to check on your print while it's active."
     )
-    rows = [[InlineKeyboardButton(f"Layer 2 Notify: {layer2_status}", callback_data=f"layer2:{printer_num}")]]
+    rows = [[InlineKeyboardButton(f"Layer 2 Notify: {layer2_status}", callback_data=f"layer2:{printer_num}")],
+            [InlineKeyboardButton(f"Bed Cooled Notify: {cooldown_status}", callback_data=f"cooldown:{printer_num}")]]
     if anonymous_toggle:
         rows.append([InlineKeyboardButton(f"Anonymous: {anonymous_status}", callback_data=f"anon:{printer_num}")])
     rows.append(_unclaim_help_row(printer_num))

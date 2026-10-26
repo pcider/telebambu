@@ -21,6 +21,7 @@ class PrintSession:
     dm_preference: str = "chat"  # "chat" or "dm"
     layer2_notify: bool = True
     layer2_notified: bool = False
+    cooldown_notify: bool = True  # tell the claimer when the bed has cooled after the print finishes
     print_time: Optional[str] = None
     started_at: Optional[float] = None  # when the bot saw the print start, for its duration in the log chat
     file_name: Optional[str] = None
@@ -56,6 +57,18 @@ class UserPreferences:
     default_dm_preference: str = "chat"
     layer2_notify: bool = True
     anonymous: bool = False
+    cooldown_notify: bool = True
+
+
+@dataclass
+class BedCooldown:
+    """A finished print whose claimer is told once the bed is cool enough to take it off."""
+    printer_num: int
+    user_id: int
+    username: Optional[str] = None
+    material: str = "unknown"  # filament type the print used, which sets the removal temperature
+    finished_at: float = 0.0
+    anonymous: bool = False  # the claimer chose /anonymous, so a main chat fallback hides their name
 
 
 def _from_dict(cls, data: dict):
@@ -82,6 +95,7 @@ class Storage:
         self.status_message_id: Optional[int] = None
         self.roles: dict[int, Role] = {}  # user_id -> Role, only staff are stored
         self.users: dict[int, KnownUser] = {}  # user_id -> last seen username/name
+        self.bed_cooldowns: dict[int, BedCooldown] = {}  # printer number -> finished print waiting for the bed to cool
         # False while /staff is disabled: only the owner keeps a role. Stored roles are kept,
         # so admins and mods get theirs back when it is enabled again.
         self.roles_enabled = True
@@ -110,6 +124,9 @@ class Storage:
 
             for user_id, user_data in data.get('users', {}).items():
                 self.users[int(user_id)] = _from_dict(KnownUser, user_data)
+
+            for num, cooldown_data in data.get('bed_cooldowns', {}).items():
+                self.bed_cooldowns[int(num)] = _from_dict(BedCooldown, cooldown_data)
         except Exception as e:
             print(f'Failed to load data: {e}')
 
@@ -121,6 +138,7 @@ class Storage:
             'status_message_id': self.status_message_id,
             'roles': {str(uid): role.name for uid, role in self.roles.items()},
             'users': {str(uid): asdict(u) for uid, u in self.users.items()},
+            'bed_cooldowns': {str(num): asdict(c) for num, c in self.bed_cooldowns.items()},
         }
         # Write to a temp file then rename, so a crash mid-write can't corrupt data.json
         tmp_file = DATA_FILE + '.tmp'
@@ -159,6 +177,8 @@ class Storage:
             catchup=catchup,
         )
         self.active_prints[printer_num] = session
+        # A new print means the last one was taken off, so stop waiting for the bed to cool
+        self.bed_cooldowns.pop(printer_num, None)
         self._save()
         return session
 
@@ -184,7 +204,7 @@ class Storage:
         prefs = self.user_preferences.get(user_id)
         if prefs:
             changes.update(dm_preference=prefs.default_dm_preference, layer2_notify=prefs.layer2_notify,
-                           anonymous=prefs.anonymous)
+                           anonymous=prefs.anonymous, cooldown_notify=prefs.cooldown_notify)
         return self._update(printer_num, **changes)
 
     def unclaim_print(self, printer_num: int) -> Optional[PrintSession]:
@@ -250,6 +270,11 @@ class Storage:
             self.active_prints[num].anonymous = enabled
         self._save()
         return claimed
+    def set_cooldown_notify(self, printer_num: int, enabled: bool):
+        session = self.active_prints.get(printer_num)
+        if session and session.claimed_by:
+            self._user_prefs(session.claimed_by).cooldown_notify = enabled
+        self._update(printer_num, cooldown_notify=enabled)
 
     # --- Notifications ---
 
@@ -302,6 +327,21 @@ class Storage:
         if value is not None:
             changes['notify_every_last_value'] = value
         self._update(printer_num, **changes)
+
+    # --- Bed cooldown ---
+
+    def start_bed_cooldown(self, printer_num: int, user_id: int, username: Optional[str], material: str,
+                           anonymous: bool = False):
+        self.bed_cooldowns[printer_num] = BedCooldown(printer_num, user_id, username, material, time.time(),
+                                                      anonymous)
+        self._save()
+
+    def get_bed_cooldown(self, printer_num: int) -> Optional[BedCooldown]:
+        return self.bed_cooldowns.get(printer_num)
+
+    def end_bed_cooldown(self, printer_num: int):
+        if self.bed_cooldowns.pop(printer_num, None):
+            self._save()
 
     # --- Users & roles ---
 

@@ -328,6 +328,7 @@ class BotHandlers:
             _callback_pattern("claim", "claim"): self.cb_claim,
             _callback_pattern("dmpref", "dm_pref", ":(chat|dm)"): self.cb_dm_preference,
             _callback_pattern("layer2", "layer2_toggle"): self.cb_layer2_toggle,
+            r"^cooldown:\d+$": self.cb_cooldown_toggle,
             _callback_pattern("unclaim", "unclaim"): self.cb_unclaim,
             r"^anon:\d+$": self.cb_anonymous_toggle,
             r"^cam:\d+$": self.cb_refresh_camera,
@@ -1722,6 +1723,17 @@ class BotHandlers:
             return
 
         await self._set_anonymous(context, query.from_user.id, not session.anonymous)
+        text, keyboard = self._settings_message(printer_num)
+        await query.edit_message_text(text, reply_markup=keyboard)
+
+    async def cb_cooldown_toggle(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        printer_num, _ = _parse_callback(query)
+        session = await self._claimer_session(query, printer_num)
+        if not session:
+            return
+
+        self.storage.set_cooldown_notify(printer_num, not session.cooldown_notify)
         text, keyboard = self._settings_message(printer_num)
         await query.edit_message_text(text, reply_markup=keyboard)
 
