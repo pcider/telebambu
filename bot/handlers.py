@@ -3,8 +3,9 @@ import ipaddress
 import math
 import re
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
+from typing import Callable
 
 from telegram import Update, CallbackQuery, InputFile, InputMediaPhoto, MessageEntity
 from telegram.constants import ParseMode
@@ -17,15 +18,115 @@ from printers import EXTERNAL_SPOOL_TRAY, PrinterManager, SPEED_LEVELS
 from printers import files
 from . import ui
 from .messages import MessageService
-from .telegram_bot import get_bot_context, parse_chat_id
+from .telegram_bot import get_bot_context, parse_chat_id, set_command_menu
 from settings import DISABLEABLE_COMMANDS, PrinterConfig, Settings
 
 NOTIFY_USAGE = "Usage: /notify [printer] <layer> or /notify [printer] <percent>%"
 NOTIFY_EVERY_USAGE = "Usage: /notify_every [printer] layers <number>, time <minutes>, percent <number>, or off"
-CONFIG_USAGE = "Usage: /config or /config set <chat_id|status_chat_id|log_chat_id|update_interval> <value>"
-# Settings the owner can change at runtime; chat targets are 'chat_id' or 'chat_id/thread_id'
-CONFIG_KEYS = ("chat_id", "status_chat_id", "log_chat_id", "update_interval")
+CONFIG_USAGE = ("Usage:\n"
+                "/config - Show settings\n"
+                "/config set <key> <value>\n"
+                "/config here <chat_id|status_chat_id|log_chat_id> - Use this chat and topic\n"
+                "/config disable <command> or /config enable <command>")
 MIN_UPDATE_INTERVAL = 1  # seconds
+OFF_VALUES = ("none", "off", "null")
+
+
+def _parse_chat(raw: str) -> str:
+    parse_chat_id(raw)  # raises ValueError with a message for the owner
+    return raw
+
+
+def _parse_optional_chat(raw: str) -> str | None:
+    return None if raw.lower() in OFF_VALUES else _parse_chat(raw)
+
+
+def _parse_thread(raw: str) -> int | None:
+    if raw.lower() in OFF_VALUES:
+        return None
+    if not raw.isdigit():
+        raise ValueError(f"'{raw}' is not a topic (thread) id; use a number, or none for no topic.")
+    return int(raw)
+
+
+def _seconds(value: float) -> float:
+    return int(value) if value.is_integer() else value
+
+
+def _parse_update_interval(raw: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0
+    # nan passes a < check and makes asyncio.sleep return at once; inf is allowed (see README)
+    if math.isnan(value) or value < MIN_UPDATE_INTERVAL:
+        raise ValueError(f"update_interval must be a number of seconds, at least {MIN_UPDATE_INTERVAL}.")
+    return _seconds(value)
+
+
+def _parse_stats_log_interval(raw: str) -> float | None:
+    if raw.lower() in OFF_VALUES:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0
+    if math.isnan(value) or value <= 0:
+        raise ValueError("stats_log_interval must be a positive number of seconds, or none to turn it off.")
+    return _seconds(value)
+
+
+def _parse_bool(raw: str) -> bool:
+    value = raw.lower()
+    if value in ("true", "on", "yes", "1"):
+        return True
+    if value in ("false", "off", "no", "0"):
+        return False
+    raise ValueError(f"'{raw}' is not true or false.")
+
+
+@dataclass(frozen=True)
+class ConfigKey:
+    """A setting /config set can change. With ``target``, it's the topic (thread) id part of
+    that chat target setting instead of a Settings attribute of its own."""
+    parse: Callable[[str], object]  # raises ValueError with a message for the owner
+    target: str | None = None
+
+
+# Settings the owner can change at runtime, in /config order; chat targets are 'chat_id' or
+# 'chat_id/thread_id'. The bot token, owner_id (see /staff) and printers (see /printer) aren't here.
+CONFIG_KEYS = {
+    "chat_id": ConfigKey(_parse_chat),
+    "thread_id": ConfigKey(_parse_thread, target="chat_id"),
+    "status_chat_id": ConfigKey(_parse_chat),
+    "status_thread_id": ConfigKey(_parse_thread, target="status_chat_id"),
+    "log_chat_id": ConfigKey(_parse_optional_chat),
+    "log_thread_id": ConfigKey(_parse_thread, target="log_chat_id"),
+    "update_interval": ConfigKey(_parse_update_interval),
+    "stats_log_interval": ConfigKey(_parse_stats_log_interval),
+    "auto_restart_printers": ConfigKey(_parse_bool),
+}
+# Keys /config here sets to the chat and topic it's sent in
+CHAT_TARGET_KEYS = ("chat_id", "status_chat_id", "log_chat_id")
+
+
+def get_config_value(settings: Settings, key: str):
+    target = CONFIG_KEYS[key].target
+    if target is None:
+        return getattr(settings, key)
+    return parse_chat_id(getattr(settings, target))[1]
+
+
+def set_config_value(settings: Settings, key: str, value):
+    """Change a config key in memory. Raises ValueError for a topic id with no chat to go with."""
+    target = CONFIG_KEYS[key].target
+    if target is None:
+        setattr(settings, key, value)
+        return
+    chat, _ = parse_chat_id(getattr(settings, target))
+    if chat is None:
+        raise ValueError(f"Set {target} before {key}.")
+    setattr(settings, target, chat if value is None else f"{chat}/{value}")
 PRINTER_USAGE = (
     "Usage:\n"
     "/printer list\n"
@@ -1101,51 +1202,79 @@ class BotHandlers:
         await reply(f"{name} is now {new_role.label}.")
 
     async def cmd_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Owner only: show or change chat targets and the update interval."""
-        reply = update.effective_message.reply_text
+        """Owner only: show or change settings, chat targets and disabled commands."""
+        message = update.effective_message
+        reply = message.reply_text
         if self.storage.get_role(update.effective_user.id) != Role.OWNER:
             await reply("Only the owner can use this command.")
             return
 
         args = context.args
         if not args:
-            await reply(ui.config_text(self.settings, CONFIG_KEYS))
+            values = {key: get_config_value(self.settings, key) for key in CONFIG_KEYS}
+            await reply(ui.config_text(values, self.settings.disabled()))
             return
-        if args[0].lower() != "set" or len(args) != 3 or args[1].lower() not in CONFIG_KEYS:
+        action = args[0].lower()
+        if action in ("disable", "enable") and len(args) == 2:
+            await self._config_toggle_command(update, context, args[1].lower().lstrip("/"), action == "disable")
+            return
+        if action == "here" and len(args) == 2 and args[1].lower() in CHAT_TARGET_KEYS:
+            key = args[1].lower()
+            # Outside forum topics message_thread_id is a reply chain, not a topic
+            thread = message.message_thread_id if message.is_topic_message else None
+            raw = f"{message.chat_id}/{thread}" if thread else str(message.chat_id)
+        elif action == "set" and len(args) == 3 and args[1].lower() in CONFIG_KEYS:
+            key, raw = args[1].lower(), args[2]
+        else:
             await reply(CONFIG_USAGE)
             return
 
-        key, raw = args[1].lower(), args[2]
-        if key == "update_interval":
-            try:
-                value = float(raw)
-            except ValueError:
-                value = 0
-            # nan passes a < check and makes asyncio.sleep return at once; inf is allowed (see README)
-            if math.isnan(value) or value < MIN_UPDATE_INTERVAL:
-                await reply(f"update_interval must be a number of seconds, at least {MIN_UPDATE_INTERVAL}.")
-                return
-            value = int(value) if value.is_integer() else value
-        elif key == "log_chat_id" and raw.lower() in ("none", "off"):
-            value = None
-        else:
-            try:
-                parse_chat_id(raw)
-            except ValueError as e:
-                await reply(str(e))
-                return
-            value = raw
-
-        old = getattr(self.settings, key)
-        setattr(self.settings, key, value)
+        old = get_config_value(self.settings, key)
+        try:
+            value = CONFIG_KEYS[key].parse(raw)
+            set_config_value(self.settings, key, value)
+        except ValueError as e:
+            await reply(str(e))
+            return
         self.settings.save()
         # Point outgoing messages at the new chats straight away
         self.ms.ctx = get_bot_context(self.settings)
-        if key == "status_chat_id":
+        if key in ("status_chat_id", "status_thread_id"):
             self.ms.reset_status_message()
+        if key == "chat_id":
+            # Admin and owner command menus are scoped to the main chat
+            await self._refresh_command_menu(context)
         await self.ms.log_message(f"Config change: {self.storage.display_name(update.effective_user.id)} "
                                   f"set {key} from {old} to {value}.")
         await reply(f"{key} set to {value}.")
+
+    async def _config_toggle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, command: str,
+                                     disable: bool):
+        reply = update.effective_message.reply_text
+        if command not in DISABLEABLE_COMMANDS:
+            await reply(f"/{command} can't be turned off. Commands that can: "
+                        + ", ".join(f"/{name}" for name in DISABLEABLE_COMMANDS))
+            return
+        state = "disabled" if disable else "enabled"
+        if self.settings.is_disabled(command) == disable:
+            await reply(f"/{command} is already {state}.")
+            return
+        self.settings.disabled_commands[command] = disable
+        self.settings.save()
+        if command == "staff":
+            # Same as at startup: a disabled /staff leaves the owner as the only role
+            self.storage.roles_enabled = not disable
+        await self._refresh_command_menu(context)
+        await self.ms.log_message(f"Config change: {self.storage.display_name(update.effective_user.id)} "
+                                  f"{state} /{command}.")
+        await reply(f"/{command} {state}.")
+
+    async def _refresh_command_menu(self, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            await set_command_menu(context.bot, self.storage, self.settings)
+        except Exception as e:
+            # The setting is saved either way; the menu catches up on the next restart
+            print(f"Failed to refresh command menu: {e}")
 
     @staticmethod
     def _printer_field_error(field: str, value: str) -> str | None:

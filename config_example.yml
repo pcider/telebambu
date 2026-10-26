@@ -10,16 +10,20 @@ telegram_bot_token: '1234567890:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'
 owner_id: 1234567890
 
 # Chat targets: 'chat_id' or 'chat_id/thread_id' for forum topics.
-# The owner can change these at runtime with /config set <key> <value>.
+# The owner can change these at runtime with /config set <key> <value>, set just the
+# topic with /config set <thread_id|status_thread_id|log_thread_id> <id>, or send
+# /config here <key> in the target chat or topic.
 chat_id: '1234567890/1234'         # Main chat for print updates
 status_chat_id: '1234567890/1234'  # Chat for the live status message
 log_chat_id: '1234567890'          # Chat for logs, or null to disable
 
-update_interval: 3          # seconds between printer polls (owner can change with /config)
+# The owner can change these three with /config set <key> <value>.
+update_interval: 3          # seconds between printer polls
 stats_log_interval: 3600    # seconds between update timing/status reports, or null to disable
 auto_restart_printers: true # false to only log idle printers with no camera instead of rebooting them
 
-# Set a command to true to turn it off. A disabled /staff also leaves the owner as the
+# Set a command to true to turn it off (the owner can use /config disable|enable <command>).
+# A disabled /staff also leaves the owner as the
 # only role: admins and mods are treated as users until it is turned back on.
 # (/forceunclaim can't be turned off, so admins can still free up a printer.)
 disabled_commands:
