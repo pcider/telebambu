@@ -38,6 +38,7 @@ disabled_commands:
   restart: false
   restartall: false
   home: false
+  beep: false
 
 # Printers by number. Admins can manage these with /printer.
 printers:

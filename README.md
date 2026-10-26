@@ -91,7 +91,7 @@ A Telegram bot for monitoring and managing a fleet of Bambu Labs 3D printers. Th
    is logged without its values (`/printer add [redacted]`), as they hold access codes and serials.
 
    `disabled_commands` turns individual commands off: set `print`, `speed`, `skip`, `staff`,
-   `forcereclaim`, `restart`, `restartall` or `home` to `true`. Disabled commands are hidden from
+   `forcereclaim`, `restart`, `restartall`, `home` or `beep` to `true`. Disabled commands are hidden from
    `/help` and the command menu and reply that they are disabled. `staff: true` also leaves the
    owner as the only role: admins and mods are treated as ordinary users, but their roles stay in
    `data.json` and come back when `staff` is set to `false` again.
@@ -188,6 +188,7 @@ sudo systemctl start telebambu
 - `/camera [printer]` - Fresh camera snapshot; in your DM it has a Refresh button
 - `/light [printer]` - Toggle the printer light
 - `/staff [list [user]]` - See the owner, admins and mods, or one user's role
+- `/beep <printer>` - Easter egg, not listed in `/help`: plays a short tune on an idle or finished printer's buzzer (once per printer every 30 seconds, logged)
 
 **Admins** (the owner can do all of these too)
 - `/camera`, `/light`, `/stop_at`, `/pause`, `/resume`, `/speed` and `/skip` work on any printer

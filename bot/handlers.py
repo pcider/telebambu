@@ -155,6 +155,8 @@ PRINTER_USAGE = (
 )
 # /printer edit field names -> PrinterConfig attributes
 PRINTER_FIELDS = {"mac": "mac", "ip": "ip", "code": "access_code", "serial_no": "serial"}
+# Minimum gap between two /beep tunes on the same printer
+BEEP_COOLDOWN = 30  # seconds
 MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$")
 NOTIFY_USER_USAGE = ("Usage: /notify_user <printer> <user> [user ...] to add, "
                      "/notify_user <printer> remove <user> [user ...] to remove, or /notify_user <printer> to list")
@@ -228,6 +230,8 @@ class BotHandlers:
         self.ms = message_service
         self.pm = printer_manager
         self.settings = settings
+        # Printer number -> time of its last /beep
+        self._last_beep: dict[int, float] = {}
 
     def register(self, app: Application):
         # Runs before every other handler so @usernames can be resolved later
@@ -256,6 +260,7 @@ class BotHandlers:
             "restart": self.cmd_restart,
             "restartall": self.cmd_restartall,
             "home": self.cmd_home,
+            "beep": self.cmd_beep,
             "print": self.cmd_print,
             "staff": self.cmd_staff,
             "config": self.cmd_config,
@@ -1140,6 +1145,42 @@ class BotHandlers:
             await self.ms.log_message(f"{self.storage.display_name(update.effective_user.id)} homed "
                                       f"Printer(s) {', '.join(map(str, homed))}.")
         await reply("\n".join(results))
+
+    async def cmd_beep(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Easter egg (anyone, not in /help): play a tune on an idle printer's buzzer."""
+        reply = update.effective_message.reply_text
+        args = context.args
+        if len(args) != 1 or not args[0].isdigit():
+            await reply(f"Usage: /beep <printer>\nAvailable printers: {self.pm.numbers_text()}")
+            return
+        printer_num = int(args[0])
+        if printer_num not in self.pm:
+            await reply(f"Invalid printer number. Use {self.pm.numbers_text()}")
+            return
+
+        printer = self.pm.get_online_printer(printer_num)
+        if not printer:
+            await reply(f"Printer {printer_num} is not connected.")
+            return
+        if printer.get_state() not in (GcodeState.IDLE, GcodeState.FINISH):
+            await reply(f"Printer {printer_num} is busy.")
+            return
+        wait = BEEP_COOLDOWN - (time.time() - self._last_beep.get(printer_num, 0))
+        if wait > 0:
+            await reply(f"Printer {printer_num} just beeped. Try again in {math.ceil(wait)}s.")
+            return
+
+        try:
+            sent = self.pm.beep(printer_num)
+        except Exception as e:
+            await reply(f"Failed to beep: {e}")
+            return
+        if not sent:
+            await reply(f"Failed to beep Printer {printer_num}.")
+            return
+        self._last_beep[printer_num] = time.time()
+        await self.ms.log_message(f"{self.storage.display_name(update.effective_user.id)} beeped Printer {printer_num}.")
+        await reply(f"Beep! Printer {printer_num} is playing a tune.")
 
     async def cmd_print(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Admin only (testing): print a 3MF from a replied-to document."""

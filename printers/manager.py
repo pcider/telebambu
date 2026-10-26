@@ -31,6 +31,16 @@ EXTERNAL_SPOOL_TRAY = 254
 NO_TRAY = 255
 # States where the printer is not in use
 IDLE_STATES = (GcodeState.IDLE, GcodeState.FINISH, GcodeState.UNKNOWN)
+# A short rising three-note chirp for /beep, in the M1006 buzzer format Bambu's start G-code uses
+# (S1 starts the buzzer, each A..N line plays a note, W ends it). Not yet checked on a real
+# printer; if it stays silent, some firmware accepts `M300 S<freq> P<ms>` instead.
+BEEP_GCODE = [
+    'M1006 S1',
+    'M1006 A0 B10 L100 C37 D10 M60 E37 F10 N60',
+    'M1006 A0 B10 L100 C41 D10 M60 E41 F10 N60',
+    'M1006 A0 B10 L100 C44 D10 M60 E44 F10 N60',
+    'M1006 W',
+]
 
 
 class _CameraRetryNoiseFilter(logging.Filter):
@@ -538,6 +548,14 @@ class PrinterManager:
             f'Updated on: {time.strftime("%Y-%m-%d %H:%M")}\n'
             '```\n'
         )
+
+    def beep(self, num: int) -> bool:
+        """Play a short tune on the printer's buzzer."""
+        printer = self.get_online_printer(num)
+        if not printer:
+            return False
+        # bambulabs_api's G-code check doesn't know M1006
+        return bool(printer.gcode(BEEP_GCODE, gcode_check=False))
 
     # --- Light & camera ---
 
