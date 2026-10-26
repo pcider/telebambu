@@ -196,7 +196,8 @@ sudo systemctl start telebambu
 - `/config here <chat_id|status_chat_id|log_chat_id>` - Point that chat target at the chat and topic the command is sent in
 - `/config disable <command>` / `/config enable <command>` - Turn a command off or on
 
-Role changes, force reclaims, restarts and printer/config changes are posted to the log chat.
+Print starts, finishes, failures and cancels, claims and unclaims (with the user's Telegram id), role changes,
+force reclaims, restarts and printer/config changes are posted to the log chat.
 Mods have no extra permissions yet.
 
 ### Interactive Buttons

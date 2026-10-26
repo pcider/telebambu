@@ -361,13 +361,16 @@ class BotHandlers:
             reply_markup=ui.dm_preference_keyboard(printer_num),
         )
 
-    async def _claim(self, context: ContextTypes.DEFAULT_TYPE, user_id: int, username: str, printer_num: int) -> bool:
+    async def _claim(self, context: ContextTypes.DEFAULT_TYPE, user_id: int, username: str, printer_num: int,
+                     log: bool = True) -> bool:
         """Claim an unclaimed print for a user, DM them its settings and update the main chat message.
 
         Returns False if the DM couldn't be delivered (the user hasn't started the bot yet),
-        in which case the main chat message asks them to.
+        in which case the main chat message asks them to. ``log=False`` is for callers that log their own line.
         """
         session = self.storage.claim_print(printer_num, user_id, username)
+        if log:
+            await self.ms.log_event(f"Claim: {username} ({user_id}) claimed Printer {printer_num}.")
         text = ui.claimed_text(printer_num, session)
         reply_markup = None
         try:
@@ -385,9 +388,12 @@ class BotHandlers:
             print(f'Could not update main chat message for Printer {printer_num} claim: {e}')
         return dm_sent
 
-    async def _unclaim(self, context: ContextTypes.DEFAULT_TYPE, printer_num: int) -> str:
+    async def _unclaim(self, context: ContextTypes.DEFAULT_TYPE, printer_num: int, log: bool = True) -> str:
         """Unclaim a print, restore the Claim button in the main chat and return a reply text."""
+        old = self.storage.get_print(printer_num)
         session = self.storage.unclaim_print(printer_num)
+        if log and old and old.claimed_by:
+            await self.ms.log_event(f"Unclaim: {old.claimed_username} ({old.claimed_by}) unclaimed Printer {printer_num}.")
         try:
             await context.bot.edit_message_text(
                 chat_id=session.chat_id,
@@ -948,7 +954,7 @@ class BotHandlers:
         old_claimer, old_name = session.claimed_by, session.claimed_username
         new_name = self.storage.display_name(new_claimer)
         self.storage.unclaim_print(printer_num)
-        dm_sent = await self._claim(context, new_claimer, new_name, printer_num)
+        dm_sent = await self._claim(context, new_claimer, new_name, printer_num, log=False)
 
         admin_name = self.storage.display_name(update.effective_user.id)
         if old_claimer:
@@ -980,7 +986,7 @@ class BotHandlers:
             await reply(f"Printer {printer_num} isn't claimed.")
             return
         old_claimer, old_name = session.claimed_by, session.claimed_username
-        unclaimed = await self._unclaim(context, printer_num)
+        unclaimed = await self._unclaim(context, printer_num, log=False)
 
         admin_name = self.storage.display_name(update.effective_user.id)
         try:

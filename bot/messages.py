@@ -11,6 +11,7 @@ from telegram.error import BadRequest, Forbidden
 from data import Storage
 from data.storage import PrintSession
 from errors import lookup_error
+from printers.manager import format_duration
 from . import ui
 from .telegram_bot import BotContext
 
@@ -24,6 +25,16 @@ FAIL_MESSAGE_TTL = 60 * 60 * 24  # delete failure notifications after 1 day
 def _is_cancel(error_code, reason: str) -> bool:
     """Whether a FAILED state's error code is a cancel (or no error), as a requested stop gives."""
     return not error_code or reason == "Printing was cancelled."
+
+
+def _ended_details(session: PrintSession | None) -> str:
+    """The file, claimer and duration of an ended print, for its log chat line."""
+    file_name = session.file_name if session else None
+    claimer = f"{session.claimed_username} ({session.claimed_by})" if session and session.claimed_by else "nobody"
+    details = f"'{file_name or 'unknown'}', claimed by {claimer}"
+    if session and session.started_at:
+        details += f", took {format_duration(round((time.time() - session.started_at) / 60))}"
+    return details
 
 
 class MessageService:
@@ -114,6 +125,10 @@ class MessageService:
                                  file_name: str | None = None, catchup: bool = False,
                                  names: tuple[str, str] = ('', '')) -> int:
         await self._delete_started_message(self.storage.get_print(printer_num))
+        if not catchup:  # The startup catch-up logs its own line
+            layers = f", {total_layers} layers" if total_layers else ""
+            await self.log_event(f"Printer {printer_num} started printing '{file_name or 'unknown'}' "
+                                 f"(est. {print_time}{layers}).")
 
         # Build the text from a provisional session so it matches later edits (unclaim etc.)
         draft = PrintSession(message_id=0, chat_id=self.ctx.chat_id, printer_num=printer_num,
@@ -146,6 +161,8 @@ class MessageService:
             # Still end the session, or a later startup catch-up would announce the finish again
             print(f'Failed to send finish notification for Printer {printer_num}: {e}')
         await self._notify_watchers(session, message, image)
+        if not catchup:
+            await self.log_event(f"Printer {printer_num} finished printing ({_ended_details(session)}).")
 
         self.storage.end_print(printer_num)
 
@@ -163,6 +180,14 @@ class MessageService:
         else:
             # Includes a /stop_at stop that didn't take, followed by a real failure
             message = f"Printer {printer_num} failed!\n{reason}"
+        if not catchup:
+            if session and session.stopped_at_layer and _is_cancel(error_code, reason):
+                outcome = f"was stopped at layer {session.stopped_at_layer} (/stop_at)"
+            elif _is_cancel(error_code, reason):
+                outcome = "was cancelled"
+            else:
+                outcome = f"failed: {reason} (code: {error_code})"
+            await self.log_event(f"Printer {printer_num} {outcome} ({_ended_details(session)}).")
         if catchup:
             message = ui.CATCHUP_TAG + message
         targets = []  # (chat_id, thread_id, label)
@@ -268,6 +293,13 @@ class MessageService:
         self.storage.mark_notify_every_sent(printer_num, trigger_value)
 
     # --- Log chat ---
+
+    async def log_event(self, message: str):
+        """Log a print or claim event. A failed log never stops the flow around it."""
+        try:
+            await self.log_message(message)
+        except Exception as e:
+            print(f'Failed to log event: {e}')
 
     async def log_message(self, message: str, image: bytes | None = None, stdout_only: bool = False):
         print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {message}')
