@@ -77,7 +77,7 @@ class MessageService:
                 print(f'DM to {user_id} refused, using the main chat until they /start the bot: {e}')
                 self._dm_unreachable.add(user_id)
                 # Don't forward DM-only camera/unclaim controls into the shared chat.
-                name = session.claimed_username or f'user {user_id}'
+                name = ui.public_claimer_name(session)
                 note = f'For {name}: DM unavailable. Open the bot and send /start, or unblock it.'
                 if not group_fallback:
                     return await self._send_main(note)
@@ -133,7 +133,7 @@ class MessageService:
         # A print that ran to the end finished, even if a /stop_at stop was sent and didn't take
         message = f"Printer {printer_num} has finished printing."
         if session and session.claimed_by:
-            message += f" ({session.claimed_username})"
+            message += f" ({ui.public_claimer_name(session)})"
         if catchup:
             message = ui.CATCHUP_TAG + message
 

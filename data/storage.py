@@ -40,6 +40,7 @@ class PrintSession:
     stopped_at_layer: Optional[int] = None  # set when the bot stopped the print on request
     low_filament_alerted: list[int] = field(default_factory=list)  # tray ids already reported as low
     catchup: bool = False  # announced at startup rather than when it started
+    anonymous: bool = False  # hide the claimer's name outside the log chat (from their preferences)
 
 
 @dataclass
@@ -53,6 +54,7 @@ class KnownUser:
 class UserPreferences:
     default_dm_preference: str = "chat"
     layer2_notify: bool = True
+    anonymous: bool = False
 
 
 def _from_dict(cls, data: dict):
@@ -178,7 +180,8 @@ class Storage:
         # Apply user's default preferences if they exist
         prefs = self.user_preferences.get(user_id)
         if prefs:
-            changes.update(dm_preference=prefs.default_dm_preference, layer2_notify=prefs.layer2_notify)
+            changes.update(dm_preference=prefs.default_dm_preference, layer2_notify=prefs.layer2_notify,
+                           anonymous=prefs.anonymous)
         return self._update(printer_num, **changes)
 
     def unclaim_print(self, printer_num: int) -> Optional[PrintSession]:
@@ -230,6 +233,19 @@ class Storage:
         if session and session.claimed_by:
             self._user_prefs(session.claimed_by).layer2_notify = enabled
         self._update(printer_num, layer2_notify=enabled)
+
+    def is_anonymous(self, user_id: int) -> bool:
+        prefs = self.user_preferences.get(user_id)
+        return bool(prefs and prefs.anonymous)
+
+    def set_anonymous(self, user_id: int, enabled: bool) -> list[int]:
+        """Save a user's anonymity and apply it to their current claims, returning those printers."""
+        self._user_prefs(user_id).anonymous = enabled
+        claimed = self.claimed_printers(user_id)
+        for num in claimed:
+            self.active_prints[num].anonymous = enabled
+        self._save()
+        return claimed
 
     # --- Notifications ---
 
