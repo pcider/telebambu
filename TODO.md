@@ -35,8 +35,12 @@ Last reviewed 2026-10-23. Items marked **(ask Max first)** need a design decisio
 - [ ] "Filament is running low" bug. No details recorded yet: get the symptom or a log excerpt from
       Max. The check is `PrinterMonitor._check_low_filament` (`printers/monitor.py`). It alerts once
       per tray when the active tray's `remain` is 0–10%. `remain` is -1 when the printer can't tell.
-- [ ] `/print` has two known issues, listed in `CLAUDE.md`: a failed download gets no reply, and
-      plate `0` is treated as "no plate given".
+- [ ] `/print` (`BotHandlers._print_document` in `bot/handlers.py`): the Telegram file download
+      (`get_file` / `download_as_bytearray`) isn't inside a `try`. If it fails (network error, or
+      `file_size` is missing so the 20 MB check is skipped), the exception escapes the handler and
+      the admin gets no reply.
+- [ ] `/print 3 0`: an explicit plate `0` is silently treated as "no plate given" by
+      `plate or plates[0]` and prints the first sliced plate, instead of being rejected as invalid.
 
 ## Unfixed review findings (from the review of `fea3979`)
 

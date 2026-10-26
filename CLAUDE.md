@@ -2,16 +2,7 @@
 
 Workflow: each feature or fix gets its own branch off `prod` with one commit (for cherry-picking),
 and goes through `staging` before `prod`. Open work, deploy steps and planned features are in
-`TODO.md`; keep it up to date.
-
-## Known issues (not fixed yet)
-
-- `/print` (`BotHandlers._print_document` in `bot/handlers.py`):
-  - The Telegram file download (`get_file` / `download_as_bytearray`) isn't inside a `try`. If it
-    fails (network error, or `file_size` is missing so the 20 MB check is skipped), the exception
-    escapes the handler and the admin gets no reply.
-  - An explicit plate `0` (`/print 3 0`) is silently treated as "no plate given" by `plate or plates[0]`
-    and prints the first sliced plate, instead of being rejected as invalid.
+`TODO.md`; keep it up to date. Known bugs are listed there too.
 
 ## Deliberate behaviour (don't "fix")
 
