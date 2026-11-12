@@ -124,6 +124,8 @@ then `/etc/init.d/cron enable && /etc/init.d/cron restart`.
 
 To retry a commit that failed: `FORCE=1 /root/bin/telebambu-deploy`.
 To pause deploys: comment out the cron line.
+To see what is running: `git -C /root/telebambu log -1 --oneline` (or the `revision` in the
+latest `--- BOT RESTARTED` line of `telebambu.log`).
 
 ## 5. Manual rollback (on the router)
 
