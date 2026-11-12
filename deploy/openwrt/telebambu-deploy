@@ -35,6 +35,10 @@ PYTHON=${PYTHON:-python3}
 # ensurepip (bundled pip) and building wheels are very slow or hang on the router. Set to
 # empty for a fully isolated venv.
 VENV_ARGS=${VENV_ARGS---system-site-packages --without-pip}
+# Run `pip install -r requirements.txt` in a new venv (1 = yes). Off by default: pip hangs on the
+# router, so a requirements change is installed by hand (system packages) and the new venv only
+# has to pass IMPORT_CHECK.
+PIP_INSTALL=${PIP_INSTALL:-0}
 # Wait this long for "Bot started!" in the bot log, then this long more, then check it's still up.
 START_TIMEOUT=${START_TIMEOUT:-120}
 SETTLE_SECONDS=${SETTLE_SECONDS:-20}
@@ -171,6 +175,22 @@ switch_venv() {
     ln -s "$1" venv.next && "$PYTHON" -c 'import os; os.replace("venv.next", "venv")'
 }
 
+# build_env <dir>: create a venv for $target in <dir>, install requirements (if PIP_INSTALL=1)
+# and check the bot's imports work in it
+build_env() {
+    "$PYTHON" -m venv $VENV_ARGS "$1" >> "$LOG_FILE" 2>&1 || return 1
+    # Some Python builds only create bin/python3; the service and checks use bin/python
+    [ -e "$1/bin/python" ] || ln -s python3 "$1/bin/python" || return 1
+    git show "$target:requirements.txt" > "$1/requirements.txt" || return 1
+    if [ "$PIP_INSTALL" = 1 ]; then
+        "$1/bin/python" -m pip install -q --disable-pip-version-check \
+            -r "$1/requirements.txt" >> "$LOG_FILE" 2>&1 || return 1
+    else
+        log "PIP_INSTALL=0: not installing requirements; install changes by hand if the import check fails"
+    fi
+    "$1/bin/python" -c "$IMPORT_CHECK" >> "$LOG_FILE" 2>&1
+}
+
 if git diff --quiet "$current" "$target" -- requirements.txt; then
     candidate_env=$previous_env
     log "requirements.txt unchanged; keeping venv $candidate_env"
@@ -179,12 +199,7 @@ else
     [ "$candidate_env" != "$previous_env" ] || die "candidate venv is the live venv"
     rm -rf "$candidate_env"  # never reuse a partial venv from an earlier failed attempt
     log "requirements.txt changed; building venv $candidate_env"
-    if ! "$PYTHON" -m venv $VENV_ARGS "$candidate_env" >> "$LOG_FILE" 2>&1 \
-        || ! git show "$target:requirements.txt" > "$candidate_env/requirements.txt" \
-        || ! "$candidate_env/bin/python" -m pip install -q --disable-pip-version-check \
-                -r "$candidate_env/requirements.txt" >> "$LOG_FILE" 2>&1 \
-        || ! "$candidate_env/bin/python" -c "$IMPORT_CHECK" >> "$LOG_FILE" 2>&1
-    then
+    if ! build_env "$candidate_env"; then
         rm -rf "$candidate_env"
         echo "$target" > "$FAILED_FILE"
         die "building the venv for $target failed; bot not touched"

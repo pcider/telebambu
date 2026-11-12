@@ -11,6 +11,11 @@ needs SSH access to it.
 | `telebambu-run` | `/root/bin/telebambu-run` | runs `main.py` in the foreground, logging to `telebambu.log` |
 | `telebambu-deploy` | `/root/bin/telebambu-deploy` | cron deploy with CI gate, health check and rollback |
 
+pip hangs on the router, so the bot uses the system Python packages: venvs are created with
+`--system-site-packages --without-pip` and the deploy doesn't run pip (`PIP_INSTALL=0`). When a
+commit changes `requirements.txt`, install the new packages by hand (`opkg`/`apk`, or system pip),
+or the new venv's import check fails and the deploy stops without touching the bot.
+
 What one deploy run does: fetch `origin/prod` → stop if `HEAD` already matches it → require every
 GitHub check run on that commit to be complete and green (still running → try again next run) →
 build a new venv only if `requirements.txt` changed → back up `config.yml` and `data.json` → check
@@ -54,9 +59,11 @@ mkdir -p /root/telebambu-venvs /root/bin /root/telebambu-backups /root/telebambu
 chmod 700 /root/telebambu-backups
 # --without-pip skips ensurepip, which hangs on the router; pip comes from the system
 python3 -m venv --system-site-packages --without-pip /root/telebambu-venvs/bootstrap
-/root/telebambu-venvs/bootstrap/bin/python -m pip install -r /root/telebambu/requirements.txt
+b=/root/telebambu-venvs/bootstrap/bin
+[ -e $b/python ] || ln -s python3 $b/python   # some builds only create python3
+$b/python -c 'import telegram, bambulabs_api, yaml; print("ok")'
 cd /root/telebambu
-[ -d venv ] && [ ! -L venv ] && mv venv /root/telebambu-venv.old
+if [ -L venv ]; then rm venv; elif [ -e venv ]; then mv venv /root/telebambu-venv.old; fi
 ln -s /root/telebambu-venvs/bootstrap venv
 printf '/venv\n/venv.next\n' >> .git/info/exclude
 ```
