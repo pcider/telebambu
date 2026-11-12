@@ -31,6 +31,10 @@ GITHUB_API=${GITHUB_API:-https://api.github.com}
 TOKEN_FILE=${TOKEN_FILE:-/root/.telebambu-github-token}
 SERVICE=${SERVICE:-/etc/init.d/telebambu}
 PYTHON=${PYTHON:-python3}
+# Arguments for `python3 -m venv`. The default reuses the router's system packages and pip:
+# ensurepip (bundled pip) and building wheels are very slow or hang on the router. Set to
+# empty for a fully isolated venv.
+VENV_ARGS=${VENV_ARGS---system-site-packages --without-pip}
 # Wait this long for "Bot started!" in the bot log, then this long more, then check it's still up.
 START_TIMEOUT=${START_TIMEOUT:-120}
 SETTLE_SECONDS=${SETTLE_SECONDS:-20}
@@ -175,7 +179,7 @@ else
     [ "$candidate_env" != "$previous_env" ] || die "candidate venv is the live venv"
     rm -rf "$candidate_env"  # never reuse a partial venv from an earlier failed attempt
     log "requirements.txt changed; building venv $candidate_env"
-    if ! "$PYTHON" -m venv "$candidate_env" >> "$LOG_FILE" 2>&1 \
+    if ! "$PYTHON" -m venv $VENV_ARGS "$candidate_env" >> "$LOG_FILE" 2>&1 \
         || ! git show "$target:requirements.txt" > "$candidate_env/requirements.txt" \
         || ! "$candidate_env/bin/python" -m pip install -q --disable-pip-version-check \
                 -r "$candidate_env/requirements.txt" >> "$LOG_FILE" 2>&1 \

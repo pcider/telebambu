@@ -52,7 +52,8 @@ Create the first venv and turn `venv` into a symlink (the deploy script requires
 ```sh
 mkdir -p /root/telebambu-venvs /root/bin /root/telebambu-backups /root/telebambu-deploy
 chmod 700 /root/telebambu-backups
-python3 -m venv /root/telebambu-venvs/bootstrap
+# --without-pip skips ensurepip, which hangs on the router; pip comes from the system
+python3 -m venv --system-site-packages --without-pip /root/telebambu-venvs/bootstrap
 /root/telebambu-venvs/bootstrap/bin/python -m pip install -r /root/telebambu/requirements.txt
 cd /root/telebambu
 [ -d venv ] && [ ! -L venv ] && mv venv /root/telebambu-venv.old
