@@ -1,5 +1,11 @@
 # Notes for agents
 
+## Branches
+
+- `prod` is the main branch and is what runs on the router (`deploy/openwrt/telebambu-deploy`
+  deploys `origin/prod` once CI passes). Base work on `prod` and merge into `prod`.
+- `master` is deprecated. Don't base work on it or merge into it.
+
 ## Known issues (not fixed yet)
 
 - `/print` (`BotHandlers._print_document` in `bot/handlers.py`):
