@@ -37,9 +37,9 @@ This is on `prod`, so `ci.yml` runs on every push and the deploy gate has check 
 ## 1. Prepare the router (on the router)
 
 Check space and Python first: `cat /etc/openwrt_release`, `uname -m`, `df -h`, `free`. Install
-Python 3.11+ with venv/pip support, git with HTTPS, CA certificates and curl from the firmware's
-feeds (`opkg` or `apk`; package names vary, e.g. `python3 python3-venv python3-pip git-http
-ca-bundle curl`). If the overlay is small, put the venvs on external storage. Don't copy a venv
+Python 3.11+ with venv support, git with HTTPS and CA certificates from the firmware's feeds
+(`opkg` or `apk`; package names vary, e.g. `python3 python3-venv git-http ca-bundle`). The deploy
+queries GitHub with Python, so curl isn't needed. If the overlay is small, put the venvs on external storage. Don't copy a venv
 from another machine.
 
 Stop the old bot and remove whatever starts `start.sh` at boot (cron, `/etc/rc.local`):
@@ -103,8 +103,7 @@ printf '%s\n' 'github_pat_...' > /root/.telebambu-github-token
 chmod 600 /root/.telebambu-github-token
 ```
 
-Sending the token needs `curl`; the `uclient-fetch` fallback can't add the header. A private repo
-also needs read access for `git fetch` (deploy key or HTTPS token).
+A private repo also needs read access for `git fetch` (deploy key or HTTPS token).
 
 ## 4. Try a deploy by hand, then enable cron (on the router)
 

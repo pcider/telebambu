@@ -1,6 +1,6 @@
 #!/bin/sh
 # Pull-based deploy for telebambu on OpenWrt. Install as /root/bin/telebambu-deploy and run from cron.
-# POSIX sh / busybox ash. Needs: git, python3 (with venv), curl or uclient-fetch, procd service
+# POSIX sh / busybox ash. Needs: git, python3 (with venv and ssl), procd service
 # /etc/init.d/telebambu (telebambu.init) and /root/telebambu/venv as a symlink to a venv.
 #
 # Each run:
@@ -112,22 +112,20 @@ token=
 
 ci_json=$STATE_DIR/check-runs.json
 rm -f "$ci_json"
+# Fetched with Python (urllib) rather than curl: the bot already needs Python's HTTPS support,
+# while OpenWrt's curl can break when curl and libcurl are upgraded separately.
 fetched=no
-if command -v curl >/dev/null 2>&1; then
-    if [ -n "$token" ]; then
-        curl -fsS --max-time 30 -o "$ci_json" \
-            -H 'Accept: application/vnd.github+json' \
-            -H "Authorization: Bearer $token" "$api_url" 2>> "$LOG_FILE" && fetched=yes
-    else
-        curl -fsS --max-time 30 -o "$ci_json" \
-            -H 'Accept: application/vnd.github+json' "$api_url" 2>> "$LOG_FILE" && fetched=yes
-    fi
-elif command -v uclient-fetch >/dev/null 2>&1; then
-    [ -n "$token" ] && log "warning: uclient-fetch can't send the token; install curl for a private repo"
-    uclient-fetch -q -T 30 -O "$ci_json" "$api_url" 2>> "$LOG_FILE" && fetched=yes
-else
-    die "need curl or uclient-fetch to query GitHub"
-fi
+GITHUB_TOKEN=$token "$PYTHON" - "$api_url" "$ci_json" >> "$LOG_FILE" 2>&1 <<'EOF' && fetched=yes
+import os, sys, urllib.request
+url, out = sys.argv[1], sys.argv[2]
+headers = {"Accept": "application/vnd.github+json", "User-Agent": "telebambu-deploy"}
+if os.environ.get("GITHUB_TOKEN"):
+    headers["Authorization"] = "Bearer " + os.environ["GITHUB_TOKEN"]
+with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as resp:
+    data = resp.read()
+with open(out, "wb") as f:
+    f.write(data)
+EOF
 [ "$fetched" = yes ] && [ -s "$ci_json" ] || die "GitHub API request failed for $target"
 
 # Prints success / pending / failure. Every check run must be completed with
