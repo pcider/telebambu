@@ -44,6 +44,8 @@ async def main():
         await app.start()
         await app.updater.start_polling()
         await message_service.log_message('Bot started!')
+        # Temporary marker to check the automatic deploy end to end; remove after testing
+        print('CI TEST COMPLETE', flush=True)
 
         monitor_task = asyncio.create_task(monitor.run())
         try:
