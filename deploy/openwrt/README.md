@@ -1,7 +1,7 @@
 # Deploying telebambu on OpenWrt
 
 Production runs from a git checkout at `/root/telebambu` on the router. The router itself does
-the deploy: a cron job runs `telebambu-deploy`, which pulls `origin/master` and deploys a new commit
+the deploy: a cron job runs `telebambu-deploy`, which pulls `origin/prod` and deploys a new commit
 only after GitHub CI (`.github/workflows/ci.yml`) has passed for it. Nothing outside the router
 needs SSH access to it.
 
@@ -11,7 +11,7 @@ needs SSH access to it.
 | `telebambu-run` | `/root/bin/telebambu-run` | runs `main.py` in the foreground, logging to `telebambu.log` |
 | `telebambu-deploy` | `/root/bin/telebambu-deploy` | cron deploy with CI gate, health check and rollback |
 
-What one deploy run does: fetch `origin/master` → stop if `HEAD` already matches it → require every
+What one deploy run does: fetch `origin/prod` → stop if `HEAD` already matches it → require every
 GitHub check run on that commit to be complete and green (still running → try again next run) →
 build a new venv only if `requirements.txt` changed → back up `config.yml` and `data.json` → check
 out the commit (detached HEAD) and point the `venv` symlink at the right venv → restart through
@@ -26,8 +26,8 @@ set `FAIL_ON_TRACEBACK=1` to fail on them. Startup is a limited gate: it doesn't
 is reachable, so still check `/info` after a deploy. Settings (paths, timeouts, `BRANCH`,
 `FAIL_ON_TRACEBACK`) are environment variables at the top of `telebambu-deploy`.
 
-This is on `master`, so `ci.yml` runs on every push and the deploy gate has check runs to read. A
-`master` commit with no check runs is never deployed.
+This is on `prod`, so `ci.yml` runs on every push and the deploy gate has check runs to read. A
+`prod` commit with no check runs is never deployed.
 
 ## 1. Prepare the router (on the router)
 
@@ -66,7 +66,7 @@ The deploy leaves it on a detached HEAD; use `git log -1` to see what's running,
 ## 2. Install the service (on the router)
 
 Copy the files from this directory (e.g. `scp` from a machine with the repo, or from the checkout
-now that this is on `master`):
+now that this is on `prod`):
 
 ```sh
 cp /root/telebambu/deploy/openwrt/telebambu.init   /etc/init.d/telebambu
@@ -105,7 +105,7 @@ also needs read access for `git fetch` (deploy key or HTTPS token).
 tail -n 30 /root/telebambu-deploy/deploy.log
 ```
 
-With nothing new on `master` it exits silently. Once a manual deploy (and ideally a rollback, e.g.
+With nothing new on `prod` it exits silently. Once a manual deploy (and ideally a rollback, e.g.
 of a test commit) has worked, add the cron job (`crontab -e`):
 
 ```
@@ -120,8 +120,8 @@ To pause deploys: comment out the cron line.
 ## 5. Manual rollback (on the router)
 
 Each deploy writes a backup directory `/root/telebambu-backups/<time>-<sha>` with the previous
-revision and venv. Comment out the cron line first (or the next run redeploys `master`; reverting
-the bad commit on `master` is the lasting fix), then:
+revision and venv. Comment out the cron line first (or the next run redeploys `prod`; reverting
+the bad commit on `prod` is the lasting fix), then:
 
 ```sh
 cd /root/telebambu
@@ -149,7 +149,7 @@ install different packages on different days. Pin it from the working router ven
 /root/telebambu/venv/bin/python -m pip freeze > /tmp/requirements.txt   # on the router
 ```
 
-Copy that file into a branch off `master` as `requirements.txt`, check that the `bambulabs_api` line
-is a `git+https://...@<commit>` URL (not a local path), review it and merge it into `master` like
+Copy that file into a branch off `prod` as `requirements.txt`, check that the `bambulabs_api` line
+is a `git+https://...@<commit>` URL (not a local path), review it and merge it into `prod` like
 any change. CI then tests exactly what the router installs, and the deploy builds a
 new venv because `requirements.txt` changed.
