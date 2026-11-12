@@ -25,7 +25,7 @@ STATE_DIR=${STATE_DIR:-/root/telebambu-deploy}
 LOG_FILE=${LOG_FILE:-$STATE_DIR/deploy.log}
 LOCK_DIR=${LOCK_DIR:-/var/lock/telebambu-deploy.lock}
 REMOTE=${REMOTE:-origin}
-BRANCH=${BRANCH:-prod}
+BRANCH=${BRANCH:-master}
 GITHUB_REPO=${GITHUB_REPO:-pcider/telebambu}
 GITHUB_API=${GITHUB_API:-https://api.github.com}
 TOKEN_FILE=${TOKEN_FILE:-/root/.telebambu-github-token}
@@ -34,8 +34,9 @@ PYTHON=${PYTHON:-python3}
 # Wait this long for "Bot started!" in the bot log, then this long more, then check it's still up.
 START_TIMEOUT=${START_TIMEOUT:-120}
 SETTLE_SECONDS=${SETTLE_SECONDS:-20}
-# Fail the health check if a Python traceback appears in the new log lines (1 = yes).
-FAIL_ON_TRACEBACK=${FAIL_ON_TRACEBACK:-1}
+# Fail the health check if a Python traceback appears in the new log lines (1 = yes). Off by default:
+# Telegram network timeouts log harmless tracebacks often enough to cause false rollbacks.
+FAIL_ON_TRACEBACK=${FAIL_ON_TRACEBACK:-0}
 # Run with a freshly built venv before it is used; must succeed.
 IMPORT_CHECK=${IMPORT_CHECK:-import telegram, bambulabs_api, yaml}
 FORCE=${FORCE:-0}
