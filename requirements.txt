@@ -1,2 +1,3 @@
 python-telegram-bot>=22.5
 git+https://github.com/pcider/bambulabs_api.git
+pyyaml>=6.0

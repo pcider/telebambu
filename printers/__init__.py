@@ -1,4 +1,4 @@
-from .manager import PrinterManager, PrinterEvent, EventType
-from .monitor import monitor_loop
+from .manager import PrinterManager, PrinterEvent, PrinterSnapshot, EventType, SPEED_LEVELS, EXTERNAL_SPOOL_TRAY
+from .monitor import PrinterMonitor
 
-__all__ = ['PrinterManager', 'PrinterEvent', 'EventType', 'monitor_loop']
+__all__ = ['EXTERNAL_SPOOL_TRAY', 'SPEED_LEVELS', 'PrinterManager', 'PrinterEvent', 'PrinterSnapshot', 'EventType', 'PrinterMonitor']

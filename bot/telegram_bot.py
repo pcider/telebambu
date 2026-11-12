@@ -1,7 +1,10 @@
+from telegram import BotCommand, BotCommandScopeChatMember
 from telegram.ext import Application, ContextTypes
 from dataclasses import dataclass
 
-import config as cfg
+from bot.commands import get_commands
+from data import Role, Storage
+from settings import Settings
 
 
 @dataclass
@@ -41,14 +44,42 @@ def parse_chat_id(chat_id_str: str | None) -> tuple[str | None, int | None]:
     return parts[0], int(parts[1])
 
 
-def create_application() -> Application:
-    return Application.builder().token(cfg.TELEGRAM_BOT_TOKEN).build()
+def create_application(settings: Settings) -> Application:
+    # Concurrent updates so a slow command (e.g. /camera waiting for a frame) doesn't block others
+    return Application.builder().token(settings.telegram_bot_token).concurrent_updates(True).build()
 
 
-def get_bot_context() -> BotContext:
-    chat_id, thread_id = parse_chat_id(cfg.CHAT_ID)
-    status_chat_id, status_thread_id = parse_chat_id(cfg.STATUS_CHAT_ID)
-    log_chat_id, log_thread_id = parse_chat_id(cfg.LOG_CHAT_ID)
+async def set_command_menu(bot, storage: Storage, settings: Settings) -> None:
+    """Configure Telegram slash-command menus: user commands for everyone, plus each
+    admin's and the owner's extra commands for them in the main chat."""
+    disabled = settings.disabled()
+    await bot.set_my_commands(_bot_commands(Role.USER, disabled))
+
+    chat_id, _ = parse_chat_id(settings.chat_id)
+    if chat_id is None:
+        return
+    for user_id in storage.roles:
+        role = storage.get_role(user_id)
+        scope = BotCommandScopeChatMember(chat_id=chat_id, user_id=user_id)
+        try:
+            if role >= Role.ADMIN:
+                await bot.set_my_commands(_bot_commands(role, disabled), scope=scope)
+            else:
+                # Mods have no extra commands; also clears a menu left from before /staff was disabled
+                await bot.delete_my_commands(scope=scope)
+        except Exception as e:
+            # e.g. the user isn't in the main chat; don't block startup over a menu
+            print(f'Failed to set command menu for user {user_id}: {e}')
+
+
+def _bot_commands(role: Role, disabled: frozenset[str] = frozenset()) -> list[BotCommand]:
+    return [BotCommand(command.name, command.description) for command in get_commands(role, disabled)]
+
+
+def get_bot_context(settings: Settings) -> BotContext:
+    chat_id, thread_id = parse_chat_id(settings.chat_id)
+    status_chat_id, status_thread_id = parse_chat_id(settings.status_chat_id)
+    log_chat_id, log_thread_id = parse_chat_id(settings.log_chat_id)
 
     return BotContext(
         chat_id=chat_id,

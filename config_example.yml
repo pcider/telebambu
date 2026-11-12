@@ -1,0 +1,46 @@
+# Telebambu configuration. Copy to config.yml and edit.
+# The bot rewrites config.yml when settings change through /config or /printer,
+# so comments added there are not kept.
+
+# Your Telegram bot token from @BotFather
+telegram_bot_token: '1234567890:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'
+
+# Telegram user id of the first owner. After the first run, roles are stored
+# in data.json and managed with /staff (including ownership transfers).
+owner_id: 1234567890
+
+# Chat targets: 'chat_id' or 'chat_id/thread_id' for forum topics.
+# The owner can change these at runtime with /config set <key> <value>.
+chat_id: '1234567890/1234'         # Main chat for print updates
+status_chat_id: '1234567890/1234'  # Chat for the live status message
+log_chat_id: '1234567890'          # Chat for logs, or null to disable
+
+update_interval: 3          # seconds between printer polls (owner can change with /config)
+stats_log_interval: 3600    # seconds between update timing/status reports, or null to disable
+auto_restart_printers: true # false to only log idle printers with no camera instead of rebooting them
+
+# Set a command to true to turn it off. A disabled /staff also leaves the owner as the
+# only role: admins and mods are treated as users until it is turned back on.
+# (/forceunclaim can't be turned off, so admins can still free up a printer.)
+disabled_commands:
+  print: false
+  speed: false
+  skip: false
+  staff: false
+  forcereclaim: false
+  restart: false
+  restartall: false
+  home: false
+
+# Printers by number. Admins can manage these with /printer.
+printers:
+  1:
+    mac: 'AA:BB:CC:DD:EE:FF'
+    ip: '192.168.1.123'
+    access_code: '12345678'
+    serial: '0123456789ABCDE'
+  2:
+    mac: '00:11:22:33:44:55'
+    ip: '192.168.1.124'
+    access_code: '12345679'
+    serial: '123456789ABCDEF'
