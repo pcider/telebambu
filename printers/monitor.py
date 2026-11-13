@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 
 from bambulabs_api import GcodeState
 
-from .manager import PrinterManager, PrinterEvent, EventType, format_duration, to_int, EXTERNAL_SPOOL_TRAY
+from .manager import PrinterManager, PrinterEvent, EventType, format_duration, to_int
+from .manager import EXTERNAL_SPOOL_TRAY
 
 from errors import is_filament_runout, lookup_error
 
