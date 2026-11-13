@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from bambulabs_api import GcodeState
 
 from .manager import PrinterManager, PrinterEvent, EventType, format_duration, to_int
+from .timing import LoopLagProbe, StepTimer, span, use_timer
 
 from errors import is_filament_runout, lookup_error
 
@@ -21,6 +22,8 @@ PRINT_STARTED_DELAY = 2  # seconds to let the printer update its time estimate
 CAMERA_STARTUP_GRACE = 30  # seconds
 # Warn the claimer once per tray when the active spool drops to this many percent
 LOW_FILAMENT_PERCENT = 10
+# Slow updates are logged one by one to stdout, and to the log chat at most this often, grouped
+SLOW_UPDATE_REPORT_INTERVAL = 60  # seconds
 # Only auto-restart printers in these states, so a running print is never interrupted
 NOT_PRINTING_STATES = (GcodeState.IDLE, GcodeState.FINISH)
 # States where a print is underway
@@ -65,22 +68,91 @@ class PrinterMonitor:
         self._stats_since = time.monotonic()
         self._last_tick_at: float | None = None
         self._tick_gaps: list[float] = []
+        # Step timings of the previous update, the event loop's lag, and the slowest update so far
+        self._last_timer: StepTimer | None = None
+        self._lag_probe = LoopLagProbe()
+        self._slowest: tuple[float, str] | None = None  # (gap, breakdown) in the stats window
+        self._slow_count = 0  # slow updates not yet reported to the log chat
+        self._slow_worst: tuple[float, str] | None = None
+        self._slow_reported_at = time.monotonic()
 
     async def run(self):
-        while True:
-            await asyncio.sleep(self.settings.update_interval)
-            self._record_tick()
-            try:
-                await self.log_stats_if_due()
-                await self.tick()
-            except Exception as e:
-                print(f'Monitor tick failed: {e}')
+        self._lag_probe.start()
+        try:
+            while True:
+                interval = self.settings.update_interval
+                sleep_started = time.monotonic()
+                await asyncio.sleep(interval)
+                woke_late = time.monotonic() - sleep_started - interval
+                gap = self._record_tick()
+                try:
+                    if gap is not None:
+                        await self._check_slow_update(gap, interval, woke_late)
+                    await self._report_slow_updates_if_due()
+                except Exception as e:
+                    print(f'Failed to check update timing: {e}')
 
-    def _record_tick(self):
+                timer = StepTimer()
+                with use_timer(timer):
+                    try:
+                        with span('stats'):
+                            await self.log_stats_if_due()
+                        await self.tick()
+                    except Exception as e:
+                        print(f'Monitor tick failed: {e}')
+                timer.finish()
+                self._last_timer = timer
+        finally:
+            self._lag_probe.stop()
+
+    def _record_tick(self) -> float | None:
+        """Note the start of an update; returns the time since the previous one started."""
         now = time.monotonic()
+        gap = None
         if self._last_tick_at is not None:
-            self._tick_gaps.append(now - self._last_tick_at)
+            gap = now - self._last_tick_at
+            self._tick_gaps.append(gap)
         self._last_tick_at = now
+        return gap
+
+    def _describe_gap(self, gap: float, expected: float, woke_late: float, loop_lag: float) -> str:
+        """Where the time between two update starts went, e.g. for the 39.28s max in the stats."""
+        prev = self._last_timer
+        took = f'{prev.total:.2f}s [{prev.breakdown()}]' if prev else 'unknown'
+        return (f'{gap:.2f}s (+{gap - expected:.2f}s): previous update took {took}; '
+                f'sleep woke {woke_late:.2f}s late; event loop blocked up to {loop_lag:.2f}s')
+
+    async def _check_slow_update(self, gap: float, expected: float, woke_late: float):
+        """Log the step breakdown of an update that started update_deviation_warn late or more."""
+        loop_lag = self._lag_probe.take_max()
+        deviation = self.settings.update_deviation_warn
+        is_slow = deviation is not None and gap - expected > deviation
+        is_slowest = self._slowest is None or gap > self._slowest[0]
+        if not (is_slow or is_slowest):
+            return
+        detail = self._describe_gap(gap, expected, woke_late, loop_lag)
+        if is_slowest:
+            self._slowest = (gap, detail)
+        if not is_slow:
+            return
+        await self.ms.log_message(f'Slow update {detail}', stdout_only=True)
+        self._slow_count += 1
+        if self._slow_worst is None or gap > self._slow_worst[0]:
+            self._slow_worst = (gap, detail)
+
+    async def _report_slow_updates_if_due(self):
+        """Send the slow updates since the last report to the log chat, grouped, so they can't flood it."""
+        if time.monotonic() - self._slow_reported_at < SLOW_UPDATE_REPORT_INTERVAL:
+            return
+        if self._slow_count:
+            count = self._slow_count
+            plural = 's' if count != 1 else ''
+            await self.ms.log_message(f'{count} slow update{plural} in the last '
+                                      f'{format_duration(round((time.monotonic() - self._slow_reported_at) / 60))}, '
+                                      f'worst {self._slow_worst[1]}')
+        self._slow_count = 0
+        self._slow_worst = None
+        self._slow_reported_at = time.monotonic()
 
     async def log_stats_if_due(self):
         """Log min/avg/max time between updates and every printer's status, then start a new window."""
@@ -90,8 +162,16 @@ class PrinterMonitor:
 
         gaps = self._tick_gaps
         if gaps:
+            ordered = sorted(gaps)
+            p95 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))]
             timing = (f'{len(gaps)} updates, avg {sum(gaps) / len(gaps):.2f}s, '
-                      f'min {min(gaps):.2f}s, max {max(gaps):.2f}s')
+                      f'min {min(gaps):.2f}s, p95 {p95:.2f}s, max {max(gaps):.2f}s')
+            deviation = self.settings.update_deviation_warn
+            if deviation is not None:
+                limit = self.settings.update_interval + deviation
+                timing += f', {sum(g > limit for g in gaps)} over {limit:.1f}s'
+            if self._slowest:
+                timing += f'\nSlowest: {self._slowest[1]}'
         else:
             timing = 'no updates'
         window = format_duration(round((time.monotonic() - self._stats_since) / 60))
@@ -99,33 +179,39 @@ class PrinterMonitor:
         await self.ms.log_message(f'Update stats (last {window}): {timing}\n{status}')
 
         self._tick_gaps = []
+        self._slowest = None
         self._stats_since = time.monotonic()
 
     async def tick(self):
-        await self.pm.reconnect_if_needed(self.ms.log_message)
+        with span('reconnect'):
+            await self.pm.reconnect_if_needed(self.ms.log_message)
 
         try:
-            await self.ms.update_status_message(self.pm.get_status_text())
+            with span('status msg'):
+                await self.ms.update_status_message(self.pm.get_status_text())
         except Exception as e:
             print(f'Failed to update status message: {e}')
 
         # Printers are independent, so a slow camera capture on one doesn't hold up the rest
-        await asyncio.gather(*(self._process_printer(num) for num in self.pm.numbers()))
+        with span('printers'):
+            await asyncio.gather(*(self._process_printer(num) for num in self.pm.numbers()))
 
-        await self.ms.flush_logs()
+        with span('flush logs'):
+            await self.ms.flush_logs()
 
     async def _process_printer(self, num: int):
         # Handle events first, so checks below see sessions already caught up after a restart
         for event in self.pm.poll(num):
             try:
-                await self._handle_event(event)
+                with span(f'P{num} {event.type.name}'):
+                    await self._handle_event(event)
             except Exception as e:
                 print(f'Error handling event {event.type} for printer {num}: {e}')
 
         try:
-            await self._check_stale_camera(num)
-            await self._check_periodic_camera(num)
-            await self._check_low_filament(num)
+            for check in (self._check_stale_camera, self._check_periodic_camera, self._check_low_filament):
+                with span(f'P{num} {check.__name__.removeprefix("_check_")}'):
+                    await check(num)
         except Exception as e:
             print(f'Error running checks for printer {num}: {e}')
 

@@ -10,6 +10,7 @@ from bambulabs_api import GcodeState, PrintStatus, Printer
 
 from settings import PrinterConfig
 from . import files
+from .timing import span
 
 # How long to wait for a fresh camera frame after turning the light on
 CAMERA_POLL_INTERVAL = 2  # seconds
@@ -258,7 +259,8 @@ class PrinterManager:
                 self._logged_disconnected.add(num)
                 await log_fn(f'Printer {num} ({slot.ip}) is unreachable, retrying quietly until it reconnects')
             try:
-                printer.connect()
+                with span(f'P{num} reconnect'):
+                    printer.connect()
                 slot.connected_at = time.time()
             except Exception as e:
                 if first_failure:
@@ -439,7 +441,9 @@ class PrinterManager:
         if not printer:
             return []
         try:
-            return list(self._diff_state(num, printer))
+            # State reads can block: bambulabs_api sends a pushall and waits for it once a minute
+            with span(f'P{num} poll'):
+                return list(self._diff_state(num, printer))
         except Exception as e:
             print(f'Error checking printer {num} state: {e}')
             return []
@@ -541,22 +545,25 @@ class PrinterManager:
             return None
 
         # Serialise captures per printer so concurrent requests don't clear each other's frame
-        async with self.slots[num].camera_lock:
-            light_was_on = self.is_light_on(num)
-            if not light_was_on:
-                printer.turn_light_on()
-            printer.camera_client.last_frame = None
-            try:
-                for _ in range(CAMERA_MAX_POLLS):
-                    await asyncio.sleep(CAMERA_POLL_INTERVAL)
-                    if printer.camera_client.last_frame:
-                        break
-                frame = printer.camera_client.last_frame
-            finally:
+        with span(f'P{num} camera'):
+            async with self.slots[num].camera_lock:
+                light_was_on = self.is_light_on(num)
                 if not light_was_on:
-                    try:
-                        printer.turn_light_off()
-                    except Exception as e:
-                        print(f'Failed to turn off printer {num} light: {e}')
+                    with span(f'P{num} light on'):
+                        printer.turn_light_on()
+                printer.camera_client.last_frame = None
+                try:
+                    for _ in range(CAMERA_MAX_POLLS):
+                        await asyncio.sleep(CAMERA_POLL_INTERVAL)
+                        if printer.camera_client.last_frame:
+                            break
+                    frame = printer.camera_client.last_frame
+                finally:
+                    if not light_was_on:
+                        try:
+                            with span(f'P{num} light off'):
+                                printer.turn_light_off()
+                        except Exception as e:
+                            print(f'Failed to turn off printer {num} light: {e}')
 
         return bytes(frame) if frame else None
