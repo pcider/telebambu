@@ -1,10 +1,13 @@
 """Update timing: slow updates are traced to the step that caused them."""
 import asyncio
+import io
 import time
+from contextlib import redirect_stdout
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+from printers.manager import _disable_read_pushall
 from printers.monitor import PrinterMonitor
 from printers.timing import LoopLagProbe, StepTimer, span, use_timer
 
@@ -106,22 +109,90 @@ class SlowUpdateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Slowest: 39.28s (+34.28s)', text)
         self.assertIsNone(monitor._slowest)
 
+    async def run_for(self, monitor: PrinterMonitor, seconds: float) -> str:
+        """Run the monitor for a while; returns what it printed to stdout."""
+        out = io.StringIO()
+        with redirect_stdout(out):
+            task = asyncio.create_task(monitor.run())
+            await asyncio.sleep(seconds)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        return out.getvalue()
+
     async def test_run_names_the_step_that_made_an_update_late(self):
         monitor, ms = make_monitor()
 
-        async def slow_status(_text):
+        async def slow_reconnect(_log_fn):
             await asyncio.sleep(0.15)
-        ms.update_status_message.side_effect = slow_status
+        monitor.pm.reconnect_if_needed.side_effect = slow_reconnect
 
-        task = asyncio.create_task(monitor.run())
-        await asyncio.sleep(0.5)
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-
+        await self.run_for(monitor, 0.5)
         slow = [t for t in logged(ms) if t.startswith('Slow update')]
         self.assertTrue(slow, logged(ms))
-        self.assertIn('status msg 0.1', slow[0])
+        self.assertIn('reconnect 0.1', slow[0])
 
+    async def test_slow_telegram_status_edit_no_longer_delays_updates(self):
+        monitor, ms = make_monitor(update_time_budget=0.1)
+
+        async def slow_status(_text):
+            await asyncio.sleep(0.3)
+        ms.update_status_message.side_effect = slow_status
+
+        out = await self.run_for(monitor, 0.6)
+        self.assertFalse([t for t in logged(ms) if t.startswith('Slow update')], logged(ms))
+        self.assertIn('Skipped status msg: the previous one is still running', out)
+        self.assertIn('Background status msg took 0.3', out)
+
+    async def test_stuck_update_is_cut_off_at_the_budget_and_updates_continue(self):
+        monitor, ms = make_monitor(update_time_budget=0.1)
+
+        async def hang(_log_fn):
+            await asyncio.sleep(3600)
+        monitor.pm.reconnect_if_needed.side_effect = hang
+
+        out = await self.run_for(monitor, 0.6)
+        self.assertIn('Update stopped at its 0.1s budget during: reconnect', out)
+        self.assertGreaterEqual(out.count('Update stopped'), 3)  # later updates still run
+
+    async def test_printer_events_are_handled_off_the_update_in_order(self):
+        monitor, ms = make_monitor()
+        monitor.pm.numbers.return_value = [4]
+        polls = iter([['started'], ['layer 1'], ['layer 2'], ['finished']])
+        monitor.pm.poll.side_effect = lambda num: next(polls, [])
+        handled: list[str] = []
+
+        async def slow_handle(num, events):
+            handled.extend(events)
+            await asyncio.sleep(0.12)  # like a camera capture; spans several updates
+        monitor._process_printer = slow_handle
+
+        await self.run_for(monitor, 0.6)
+        self.assertEqual(handled, ['started', 'layer 1', 'layer 2', 'finished'])
+        self.assertFalse([t for t in logged(ms) if t.startswith('Slow update')], logged(ms))
+
+
+class LibraryBlockingTests(unittest.IsolatedAsyncioTestCase):
+    def test_state_reads_no_longer_send_pushall(self):
+        from bambulabs_api.mqtt_client import PrinterMQTTClient
+        client = PrinterMQTTClient.__new__(PrinterMQTTClient)
+        client._last_update = 0
+        client.pushall = Mock()
+        _disable_read_pushall(SimpleNamespace(mqtt_client=client))
+        self.assertFalse(client._update())
+        client.pushall.assert_not_called()
+
+    async def test_text_logs_wait_for_the_flush_but_images_go_straight_away(self):
+        from bot.messages import MessageService
+        from bot.telegram_bot import BotContext
+        bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
+        ms = MessageService(bot, BotContext('-100', None, '-100', None, '-200', None), Mock())
+        with redirect_stdout(io.StringIO()):
+            await ms.log_message('Printer 4 is back online')
+            bot.send_message.assert_not_awaited()
+            await ms.flush_logs()
+            bot.send_message.assert_awaited_once()
+            await ms.log_message('Printer 4 has paused printing.', b'jpeg')
+            bot.send_photo.assert_awaited_once()
 
 if __name__ == '__main__':
     unittest.main()

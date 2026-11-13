@@ -17,6 +17,12 @@ CAMERA_POLL_INTERVAL = 2  # seconds
 CAMERA_MAX_POLLS = 10
 # Minimum gap between two pause notifications for the same printer
 PAUSE_NOTIFY_COOLDOWN = 60  # seconds
+# Upper bound on a single blocking bambulabs_api call made during an update (connect, pushall,
+# light). They run in a thread, so a printer with a stalled connection can't freeze the bot.
+BLOCKING_CALL_TIMEOUT = 3  # seconds
+# How often to ask each printer for a full status report. bambulabs_api would otherwise send it
+# from inside any state read, on the event loop, waiting for the publish with no time limit.
+PUSHALL_INTERVAL = 60  # seconds
 # Upper bound on waiting for a printer restart, so a hang in bambulabs_api can't freeze the bot
 RESTART_TIMEOUT = 60  # seconds
 # States a printer can be in right before a new print starts running
@@ -84,6 +90,15 @@ async def run_blocking(fn, timeout: float):
 
     threading.Thread(target=worker, name=f'blocking-{fn.__name__}', daemon=True).start()
     return await asyncio.wait_for(future, timeout)
+
+
+def _disable_read_pushall(printer: Printer):
+    """Stop bambulabs_api sending a pushall from inside state reads (it waits for the publish on
+    the event loop with no time limit); PrinterManager.request_pushalls sends them instead."""
+    try:
+        printer.mqtt_client.pushall_timeout = float('inf')
+    except AttributeError:
+        print('bambulabs_api has no pushall_timeout; state reads may block on pushall')
 
 
 def format_duration(total_mins) -> str:
@@ -195,6 +210,10 @@ class PrinterSlot:
     camera_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Objects of the current print, keyed by its file so a new print re-reads them
     objects_cache: tuple[str, list[files.PrintObject]] | None = None
+    # Background reconnect and pushall, at most one of each at a time
+    reconnect_task: asyncio.Task | None = None
+    pushall_task: asyncio.Task | None = None
+    pushall_at: float = 0.0
 
 
 class PrinterManager:
@@ -236,12 +255,15 @@ class PrinterManager:
             # Keep the Printer object even if the first connect fails, so
             # reconnect_if_needed() can keep retrying it.
             slot.printer = bl.Printer(slot.ip, slot.access_code, slot.serial)
+            _disable_read_pushall(slot.printer)
             slot.printer.connect()
             slot.connected_at = time.time()
         except Exception as e:
             await log_fn(f'Failed to connect to printer {num}: {e}')
 
     async def reconnect_if_needed(self, log_fn):
+        """Retry disconnected printers. Each connect runs in the background, so an unreachable
+        printer can't hold up the update that noticed it."""
         for num in self.numbers():
             slot = self.slots.get(num)
             printer = slot.printer if slot else None
@@ -252,19 +274,47 @@ class PrinterManager:
                     self._logged_disconnected.discard(num)
                     await log_fn(f'Printer {num} is back online')
                 continue
+            if slot.reconnect_task and not slot.reconnect_task.done():
+                continue  # the previous attempt is still running
 
             # Only log once per outage; retries continue silently until it's back
             first_failure = num not in self._logged_disconnected
             if first_failure:
                 self._logged_disconnected.add(num)
                 await log_fn(f'Printer {num} ({slot.ip}) is unreachable, retrying quietly until it reconnects')
-            try:
-                with span(f'P{num} reconnect'):
-                    printer.connect()
-                slot.connected_at = time.time()
-            except Exception as e:
-                if first_failure:
-                    print(f'Failed to reconnect printer {num}: {e}')
+            slot.reconnect_task = asyncio.create_task(self._reconnect(num, slot, printer, first_failure))
+
+    @staticmethod
+    async def _reconnect(num: int, slot: PrinterSlot, printer: Printer, first_failure: bool):
+        try:
+            await run_blocking(printer.connect, BLOCKING_CALL_TIMEOUT)
+            slot.connected_at = time.time()
+        except Exception as e:
+            if first_failure:
+                print(f'Failed to reconnect printer {num}: {e!r}')
+
+    def request_pushalls(self):
+        """Ask each online printer for a full report every PUSHALL_INTERVAL, in the background."""
+        now = time.monotonic()
+        for num in self.numbers():
+            slot = self.slots[num]
+            printer = slot.printer
+            # Connected is enough: a printer that hasn't reported yet needs the pushall most
+            if not printer or not printer.mqtt_client_connected() or now - slot.pushall_at < PUSHALL_INTERVAL:
+                continue
+            if slot.pushall_task and not slot.pushall_task.done():
+                continue
+            slot.pushall_at = now
+            slot.pushall_task = asyncio.create_task(self._pushall(num, printer))
+
+    @staticmethod
+    async def _pushall(num: int, printer: Printer):
+        try:
+            await run_blocking(printer.mqtt_client.pushall, BLOCKING_CALL_TIMEOUT)
+        except TimeoutError:
+            print(f'Printer {num}: pushall not sent within {BLOCKING_CALL_TIMEOUT}s')
+        except Exception as e:
+            print(f'Printer {num}: pushall failed: {e!r}')
 
     async def add_printer(self, num: int, config: PrinterConfig, log_fn):
         self.slots[num] = PrinterSlot(ip=config.ip, access_code=config.access_code, serial=config.serial, mac=config.mac)
@@ -550,7 +600,10 @@ class PrinterManager:
                 light_was_on = self.is_light_on(num)
                 if not light_was_on:
                     with span(f'P{num} light on'):
-                        printer.turn_light_on()
+                        try:
+                            await run_blocking(printer.turn_light_on, BLOCKING_CALL_TIMEOUT)
+                        except Exception as e:
+                            print(f'Failed to turn on printer {num} light: {e!r}')
                 printer.camera_client.last_frame = None
                 try:
                     for _ in range(CAMERA_MAX_POLLS):
@@ -562,7 +615,7 @@ class PrinterManager:
                     if not light_was_on:
                         try:
                             with span(f'P{num} light off'):
-                                printer.turn_light_off()
+                                await run_blocking(printer.turn_light_off, BLOCKING_CALL_TIMEOUT)
                         except Exception as e:
                             print(f'Failed to turn off printer {num} light: {e}')
 

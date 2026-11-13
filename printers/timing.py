@@ -21,6 +21,7 @@ class StepTimer:
         self.total: float | None = None  # set by finish()
         self.spans: dict[str, float] = {}
         self._open: dict[str, int] = {}
+        self.interrupted: list[str] = []
 
     @contextmanager
     def span(self, name: str):
@@ -29,6 +30,10 @@ class StepTimer:
         self._open[name] = self._open.get(name, 0) + 1
         try:
             yield
+        except asyncio.CancelledError:
+            # Cut off (e.g. by the update's time budget): remember where, innermost step first
+            self.interrupted.append(name)
+            raise
         finally:
             self.spans[name] = self.spans.get(name, 0.0) + time.monotonic() - start
             self._open[name] -= 1
@@ -42,7 +47,7 @@ class StepTimer:
         self.total = self.elapsed()
 
     def open_steps(self) -> list[str]:
-        """Steps that haven't finished yet, e.g. the one running when a time budget ran out."""
+        """Steps that haven't finished yet."""
         return list(self._open)
 
     def breakdown(self, limit: int = 8) -> str:

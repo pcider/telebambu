@@ -278,8 +278,10 @@ class MessageService:
             return
 
         self._log_buffer.append(message)
-        # Messages with an image are sent straight away so the image isn't dropped
-        await self.flush_logs(image, force=image is not None)
+        # Messages with an image are sent straight away so the image isn't dropped. Text waits for
+        # the monitor's flush (every update), so logging never waits on Telegram.
+        if image is not None:
+            await self.flush_logs(image, force=True)
 
     async def flush_logs(self, image: bytes | None = None, force: bool = False):
         """Send buffered log lines, at most once every LOG_THROTTLE seconds unless forced."""

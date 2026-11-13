@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 
 from bambulabs_api import GcodeState
 
-from .manager import PrinterManager, PrinterEvent, EventType, format_duration, to_int
+from .manager import (PrinterManager, PrinterEvent, EventType, format_duration, to_int, run_blocking,
+                      BLOCKING_CALL_TIMEOUT)
 from .timing import LoopLagProbe, StepTimer, span, use_timer
 
 from errors import is_filament_runout, lookup_error
@@ -75,15 +76,26 @@ class PrinterMonitor:
         self._slow_count = 0  # slow updates not yet reported to the log chat
         self._slow_worst: tuple[float, str] | None = None
         self._slow_reported_at = time.monotonic()
+        # Per printer: a worker handling its events and checks off the update, so a camera capture
+        # or a Telegram send can't make the update late
+        self._workers: dict[int, _PrinterWorker] = {}
+        # Background status message edit and log flush (task, start time), at most one of each at a time
+        self._background: dict[str, tuple[asyncio.Task, float]] = {}
 
     async def run(self):
+        """Start an update every update_interval on a fixed clock. Each update only polls the
+        printers and hands work to background tasks, and gives up after update_time_budget."""
         self._lag_probe.start()
+        next_at = time.monotonic()
         try:
             while True:
                 interval = self.settings.update_interval
-                sleep_started = time.monotonic()
-                await asyncio.sleep(interval)
-                woke_late = time.monotonic() - sleep_started - interval
+                next_at += interval
+                now = time.monotonic()
+                if next_at < now:
+                    next_at = now  # fell behind: start now rather than bursting to catch up
+                await asyncio.sleep(next_at - now)
+                woke_late = time.monotonic() - next_at
                 gap = self._record_tick()
                 try:
                     if gap is not None:
@@ -94,16 +106,29 @@ class PrinterMonitor:
 
                 timer = StepTimer()
                 with use_timer(timer):
-                    try:
-                        with span('stats'):
-                            await self.log_stats_if_due()
-                        await self.tick()
-                    except Exception as e:
-                        print(f'Monitor tick failed: {e}')
+                    await self._run_update(timer)
                 timer.finish()
                 self._last_timer = timer
         finally:
             self._lag_probe.stop()
+            self._stop_background()
+
+    async def _run_update(self, timer: StepTimer):
+        budget = self.settings.update_time_budget
+        deadline = asyncio.timeout(budget)
+        try:
+            async with deadline:
+                with span('stats'):
+                    await self.log_stats_if_due()
+                await self.tick()
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            steps = ' < '.join(timer.interrupted) or 'unknown'
+            print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] Update stopped at its {budget}s budget '
+                  f'during: {steps} [{timer.breakdown()}]')
+        except Exception as e:
+            print(f'Monitor tick failed: {e}')
 
     def _record_tick(self) -> float | None:
         """Note the start of an update; returns the time since the previous one started."""
@@ -183,25 +208,70 @@ class PrinterMonitor:
         self._stats_since = time.monotonic()
 
     async def tick(self):
+        """One update: poll every printer and queue the work. Nothing here waits on Telegram, a
+        camera or a printer command; those run in the background."""
         with span('reconnect'):
             await self.pm.reconnect_if_needed(self.ms.log_message)
+        self.pm.request_pushalls()
 
-        try:
-            with span('status msg'):
-                await self.ms.update_status_message(self.pm.get_status_text())
-        except Exception as e:
-            print(f'Failed to update status message: {e}')
+        with span('status text'):
+            status = self.pm.get_status_text()
+        self._in_background('status msg', lambda: self.ms.update_status_message(status))
 
-        # Printers are independent, so a slow camera capture on one doesn't hold up the rest
-        with span('printers'):
-            await asyncio.gather(*(self._process_printer(num) for num in self.pm.numbers()))
+        numbers = self.pm.numbers()
+        for num in numbers:
+            # Polling compares cached MQTT state, so it's quick; the events go to the printer's worker
+            events = self.pm.poll(num)
+            self._worker(num).submit(events)
+        for num in set(self._workers) - set(numbers):
+            self._workers.pop(num).stop()  # printer removed with /printer del
 
-        with span('flush logs'):
-            await self.ms.flush_logs()
+        self._in_background('flush logs', self.ms.flush_logs)
 
-    async def _process_printer(self, num: int):
+    def _worker(self, num: int) -> _PrinterWorker:
+        worker = self._workers.get(num)
+        if worker is None:
+            worker = self._workers[num] = _PrinterWorker(num, self._process_printer)
+        return worker
+
+    def _in_background(self, name: str, make_coro):
+        """Run a step as a background task, skipping it while the previous one is still running."""
+        running = self._background.get(name)
+        if running and not running[0].done():
+            print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] Skipped {name}: the previous one is still running '
+                  f'({time.monotonic() - running[1]:.1f}s)')
+            return
+        self._background[name] = (asyncio.create_task(self._timed_job(name, make_coro)), time.monotonic())
+
+    async def _timed_job(self, name: str, make_coro):
+        """Run background work with its own step timer, logging it if it took longer than the budget."""
+        timer = StepTimer()
+        with use_timer(timer):
+            try:
+                with span(name):
+                    await make_coro()
+            except Exception as e:
+                print(f'Failed: {name}: {e}')
+        timer.finish()
+        if timer.total > self.settings.update_time_budget:
+            print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] Background {name} took {timer.total:.2f}s '
+                  f'[{timer.breakdown()}]')
+
+    def _stop_background(self):
+        for worker in self._workers.values():
+            worker.stop()
+        self._workers.clear()
+        for task, _started in self._background.values():
+            task.cancel()
+        self._background.clear()
+
+    async def _process_printer(self, num: int, events: list[PrinterEvent]):
+        """Handle a printer's events, then run its checks. Runs in the printer's worker."""
+        await self._timed_job(f'P{num} work', lambda: self._handle_printer(num, events))
+
+    async def _handle_printer(self, num: int, events: list[PrinterEvent]):
         # Handle events first, so checks below see sessions already caught up after a restart
-        for event in self.pm.poll(num):
+        for event in events:
             try:
                 with span(f'P{num} {event.type.name}'):
                     await self._handle_event(event)
@@ -364,7 +434,7 @@ class PrinterMonitor:
         if not printer:
             return
         try:
-            printer.stop_print()
+            await run_blocking(printer.stop_print, BLOCKING_CALL_TIMEOUT)
         except Exception as e:
             # stop_at_layer is kept, so the next layer change tries again
             await self.ms.log_message(f'Failed to send stop to Printer {num} at layer {layer}: {e}')
@@ -393,3 +463,33 @@ class PrinterMonitor:
             await self.ms.send_layer2_notification(num, frame)
         if custom_due:
             await self.ms.send_custom_layer_notification(num, frame)
+
+
+class _PrinterWorker:
+    """Handles one printer's events and checks in order, in the background. Events that arrive
+    while it's busy are queued and handled together on its next round, so none are lost and a
+    slow round (e.g. a 20s camera capture) never delays the monitor's updates."""
+
+    def __init__(self, num: int, process):
+        self.num = num
+        self._process = process
+        self._events: list[PrinterEvent] = []
+        self._wake = asyncio.Event()
+        self._task = asyncio.create_task(self._run())
+
+    def submit(self, events: list[PrinterEvent]):
+        self._events.extend(events)
+        self._wake.set()
+
+    def stop(self):
+        self._task.cancel()
+
+    async def _run(self):
+        while True:
+            await self._wake.wait()
+            self._wake.clear()
+            events, self._events = self._events, []
+            try:
+                await self._process(self.num, events)
+            except Exception as e:
+                print(f'Printer {self.num} worker failed: {e}')
