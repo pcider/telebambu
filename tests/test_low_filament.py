@@ -1,4 +1,4 @@
-"""Low filament alerts: only a real drop on a measurable spool alerts, never a placeholder 0%."""
+"""Low filament alerts: AMS slots alert when low; the external spool (always 0%) never does."""
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -38,9 +38,10 @@ class LowFilament(unittest.IsolatedAsyncioTestCase):
         await self.check(external, tray(EXTERNAL_SPOOL_TRAY, 50, 'External spool'), external)
         self.ms.send_filament_notification.assert_not_awaited()
 
-    async def test_ams_slot_reporting_0_from_the_start_does_not_alert(self):
-        await self.check(tray(0, 0), tray(0, 0))
-        self.ms.send_filament_notification.assert_not_awaited()
+    async def test_low_ams_slot_alerts_once(self):
+        await self.check(tray(0, 5), tray(0, 3))
+        self.ms.send_filament_notification.assert_awaited_once()
+        self.assertIn('AMS1 slot 1: PLA #000000 (5% left)', self.ms.send_filament_notification.call_args.args[1])
 
     async def test_unknown_remaining_does_not_alert(self):
         await self.check(tray(0, 50), tray(0, -1))
@@ -50,13 +51,6 @@ class LowFilament(unittest.IsolatedAsyncioTestCase):
         await self.check(tray(0, 40), tray(0, 11), tray(0, 10), tray(0, 9), tray(0, 0))
         self.ms.send_filament_notification.assert_awaited_once()
         self.assertIn('10% left', self.ms.send_filament_notification.call_args.args[1])
-
-    async def test_new_print_must_see_the_slot_above_the_threshold_again(self):
-        await self.check(tray(0, 40))
-        self.session = PrintSession(101, '-100123', 4, claimed_by=42)
-        self.storage.get_print.return_value = self.session
-        await self.check(tray(0, 5))
-        self.ms.send_filament_notification.assert_not_awaited()
 
     async def test_unclaimed_print_does_not_alert(self):
         self.session.claimed_by = None

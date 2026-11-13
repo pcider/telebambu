@@ -61,10 +61,6 @@ class PrinterMonitor:
         self.settings = settings
         # Printers already reported as having a stale camera, to avoid spam
         self._stale_camera_reported: set[int] = set()
-        # Per printer: the print (its announcement message id) and the trays seen above
-        # LOW_FILAMENT_PERCENT during it. Only a tray seen above the threshold can be "running low",
-        # since printers report 0% for spools they can't measure.
-        self._filament_seen_above: dict[int, tuple[int, set[int]]] = {}
         # Time between tick starts, so event loop stalls show up on top of the sleep interval
         self._stats_since = time.monotonic()
         self._last_tick_at: float | None = None
@@ -159,33 +155,18 @@ class PrinterMonitor:
             self._stale_camera_reported.discard(num)
 
     async def _check_low_filament(self, num: int):
-        """Warn a claimed print's users once when the spool in use is nearly empty.
-
-        The external spool has no sensor and always reports 0% (the false "running low" for
-        Printer 4 on 11 Nov), and AMS slots without a Bambu RFID spool can report 0 too. So the
-        external spool is never checked, and an AMS slot only counts once this print has seen it
-        above LOW_FILAMENT_PERCENT, which a placeholder 0 never is."""
+        """Warn a claimed print's users once when the spool in use is nearly empty."""
         session = self.storage.get_print(num)
         if not session or not session.claimed_by:
-            self._filament_seen_above.pop(num, None)
             return
         snap = self.pm.snapshot(num)
         if not snap or snap.state != GcodeState.RUNNING:
             return
         tray = next((t for t in self.pm.filament(num) if t.active), None)
+        # The external spool has no sensor and always reports 0%, so it can't be "running low"
         if not tray or tray.is_external_spool:
             return
-
-        print_id, seen_above = self._filament_seen_above.get(num, (None, set()))
-        if print_id != session.message_id:  # a new print starts with nothing seen
-            seen_above = set()
-            self._filament_seen_above[num] = (session.message_id, seen_above)
-        if tray.remain > LOW_FILAMENT_PERCENT:
-            seen_above.add(tray.tray_id)
-            return
-
-        if (not 0 <= tray.remain <= LOW_FILAMENT_PERCENT or tray.tray_id not in seen_above
-                or tray.tray_id in session.low_filament_alerted):
+        if not 0 <= tray.remain <= LOW_FILAMENT_PERCENT or tray.tray_id in session.low_filament_alerted:
             return
         self.storage.mark_low_filament_alerted(num, tray.tray_id)
         await self.ms.send_filament_notification(num, f"Filament is running low ({tray.describe()}).")
