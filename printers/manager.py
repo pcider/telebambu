@@ -20,6 +20,10 @@ PAUSE_NOTIFY_COOLDOWN = 60  # seconds
 # Upper bound on a single blocking bambulabs_api call made during an update (connect, pushall,
 # light). They run in a thread, so a printer with a stalled connection can't freeze the bot.
 BLOCKING_CALL_TIMEOUT = 3  # seconds
+# Upper bound on creating and connecting a Printer (startup, /printer add, /printer edit)
+CONNECT_TIMEOUT = 10  # seconds
+# Upper bound on the start command after a /print upload
+START_PRINT_TIMEOUT = 10  # seconds
 # How often to ask each printer for a full status report. bambulabs_api would otherwise send it
 # from inside any state read, on the event loop, waiting for the publish with no time limit.
 PUSHALL_INTERVAL = 60  # seconds
@@ -80,16 +84,30 @@ async def run_blocking(fn, timeout: float):
         else:
             future.set_result(result)
 
+    def report(*args):
+        try:
+            loop.call_soon_threadsafe(settle, *args)
+        except RuntimeError:
+            pass  # the loop has closed (shutdown) after we stopped waiting; nobody needs the result
+
     def worker():
         try:
             result = fn()
         except BaseException as e:
-            loop.call_soon_threadsafe(settle, None, e)
+            report(None, e)
         else:
-            loop.call_soon_threadsafe(settle, result)
+            report(result)
 
     threading.Thread(target=worker, name=f'blocking-{fn.__name__}', daemon=True).start()
     return await asyncio.wait_for(future, timeout)
+
+
+class PrinterTimeout(TimeoutError):
+    """A printer command that didn't finish in time. It may still reach the printer."""
+
+    def __init__(self, num: int, timeout: float):
+        super().__init__(f"Printer {num} didn't respond within {timeout:g}s; the command may still go through.")
+        self.num = num
 
 
 def _disable_read_pushall(printer: Printer):
@@ -254,9 +272,13 @@ class PrinterManager:
         try:
             # Keep the Printer object even if the first connect fails, so
             # reconnect_if_needed() can keep retrying it.
-            slot.printer = bl.Printer(slot.ip, slot.access_code, slot.serial)
-            _disable_read_pushall(slot.printer)
-            slot.printer.connect()
+            def create():
+                return bl.Printer(slot.ip, slot.access_code, slot.serial)
+            # Both run in a thread: an unreachable printer can't freeze the bot while it connects
+            printer = await run_blocking(create, CONNECT_TIMEOUT)
+            _disable_read_pushall(printer)
+            slot.printer = printer
+            await run_blocking(printer.connect, CONNECT_TIMEOUT)
             slot.connected_at = time.time()
         except Exception as e:
             await log_fn(f'Failed to connect to printer {num}: {e}')
@@ -431,13 +453,26 @@ class PrinterManager:
             speed_percent=to_int(printer.get_print_speed()),
         )
 
-    def set_speed(self, num: int, level: int) -> bool:
+    async def command(self, num: int, fn, *args, timeout: float | None = None):
+        """Run a bambulabs_api printer command in a thread. The library waits for the MQTT publish
+        with no time limit, which on the event loop would freeze the whole bot while one printer's
+        connection is stalled. Raises PrinterTimeout if it takes longer than `timeout`."""
+        def call():
+            return fn(*args)
+        call.__name__ = getattr(fn, '__name__', 'command')
+        timeout = BLOCKING_CALL_TIMEOUT if timeout is None else timeout
+        try:
+            return await run_blocking(call, timeout)
+        except TimeoutError:
+            raise PrinterTimeout(num, timeout) from None
+
+    async def set_speed(self, num: int, level: int) -> bool:
         """Switch the print speed profile (1 silent .. 4 ludicrous)."""
         printer = self.get_online_printer(num)
         if not printer:
             return False
         # Printer.set_print_speed() only accepts 0-3, but the printer's profiles are 1-4
-        return bool(printer.mqtt_client.set_print_speed_lvl(level))
+        return bool(await self.command(num, printer.mqtt_client.set_print_speed_lvl, level))
 
     async def print_objects(self, num: int) -> list[files.PrintObject]:
         """Objects on the plate being printed, read from the print's 3MF over FTP. Raises on failure."""
@@ -466,16 +501,18 @@ class PrinterManager:
         slot = self.slots[num]
         await asyncio.wait_for(asyncio.to_thread(files.upload, slot.ip, slot.access_code, f'/{filename}', data),
                                UPLOAD_TIMEOUT)
-        if not printer.start_print(filename, plate, use_ams=use_ams, ams_mapping=mapping):
+        def start():
+            return printer.start_print(filename, plate, use_ams=use_ams, ams_mapping=mapping)
+        if not await self.command(num, start, timeout=START_PRINT_TIMEOUT):
             raise RuntimeError('the printer did not accept the print command')
 
     def skipped_objects(self, num: int) -> list[int]:
         printer = self.get_online_printer(num)
         return list(printer.get_skipped_objects() or []) if printer else []
 
-    def skip_objects(self, num: int, identify_ids: list[int]) -> bool:
+    async def skip_objects(self, num: int, identify_ids: list[int]) -> bool:
         printer = self.get_online_printer(num)
-        return bool(printer and printer.skip_objects(identify_ids))
+        return bool(printer and await self.command(num, printer.skip_objects, identify_ids))
 
     def filament(self, num: int) -> list[FilamentTray]:
         printer = self.get_online_printer(num)
@@ -576,10 +613,10 @@ class PrinterManager:
         printer = self.get_online_printer(num)
         return bool(printer) and printer.get_light_state() == 'on'
 
-    def set_light(self, num: int, on: bool):
+    async def set_light(self, num: int, on: bool):
         printer = self.get_online_printer(num)
         if printer:
-            printer.turn_light_on() if on else printer.turn_light_off()
+            await self.command(num, printer.turn_light_on if on else printer.turn_light_off)
 
     def has_camera_frame(self, num: int) -> bool:
         printer = self.get_online_printer(num)

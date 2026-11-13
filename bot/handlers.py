@@ -15,6 +15,7 @@ from bambulabs_api import GcodeState
 from data import Role, Storage, can_assign
 from printers import EXTERNAL_SPOOL_TRAY, PrinterManager, SPEED_LEVELS
 from printers import files
+from printers.manager import PrinterTimeout
 from . import ui
 from .messages import MessageService
 from .telegram_bot import get_bot_context, parse_chat_id
@@ -530,7 +531,10 @@ class BotHandlers:
             await reply(f"Printer {printer_num} can't be {verb}d while it is {state.name}.")
             return
         try:
-            ok = printer.pause_print() if pause else printer.resume_print()
+            ok = await self.pm.command(printer_num, printer.pause_print if pause else printer.resume_print)
+        except PrinterTimeout as e:
+            await reply(str(e))
+            return
         except Exception as e:
             ok, error = False, e
         else:
@@ -583,7 +587,12 @@ class BotHandlers:
         if state not in (GcodeState.RUNNING, GcodeState.PAUSE):
             await reply(f"Printer {printer_num} isn't printing, so its speed can't be changed.")
             return
-        if not self.pm.set_speed(printer_num, level):
+        try:
+            changed = await self.pm.set_speed(printer_num, level)
+        except PrinterTimeout as e:
+            await reply(str(e))
+            return
+        if not changed:
             await reply(f"Failed to change Printer {printer_num}'s speed.")
             return
         await self.ms.log_message(f"{self.storage.display_name(update.effective_user.id)} set Printer {printer_num} "
@@ -633,7 +642,12 @@ class BotHandlers:
         if skipped | {obj.identify_id for obj in chosen} >= {obj.identify_id for obj in objects}:
             await reply("That would skip every object. Use /stop_at or stop the print instead.")
             return
-        if not self.pm.skip_objects(printer_num, [obj.identify_id for obj in chosen]):
+        try:
+            skipped_ok = await self.pm.skip_objects(printer_num, [obj.identify_id for obj in chosen])
+        except PrinterTimeout as e:
+            await reply(str(e))
+            return
+        if not skipped_ok:
             await reply(f"Failed to skip objects on Printer {printer_num}.")
             return
 
@@ -785,8 +799,10 @@ class BotHandlers:
 
         try:
             turn_on = not self.pm.is_light_on(printer_num)
-            self.pm.set_light(printer_num, turn_on)
+            await self.pm.set_light(printer_num, turn_on)
             await reply(f"Printer {printer_num} light turned {'ON' if turn_on else 'OFF'}.")
+        except PrinterTimeout as e:
+            await reply(str(e))
         except Exception as e:
             await reply(f"Failed to toggle light: {e}")
 
@@ -941,20 +957,27 @@ class BotHandlers:
         if not nums:
             return
 
-        results = []
-        homed = []
-        for num in nums:
+        async def home(num: int) -> tuple[str, bool]:
             printer = self.pm.get_online_printer(num)
             if not printer:
-                results.append(f"Printer {num} is not connected.")
-            elif printer.get_state() in (GcodeState.RUNNING, GcodeState.PAUSE, GcodeState.PREPARE):
+                return f"Printer {num} is not connected.", False
+            state = printer.get_state()
+            if state in (GcodeState.RUNNING, GcodeState.PAUSE, GcodeState.PREPARE):
                 # Homing moves the toolhead and bed, which would ruin a print in progress
-                results.append(f"Printer {num} is busy ({printer.get_state().name}), not homing.")
-            elif printer.home_printer():
-                homed.append(num)
-                results.append(f"Printer {num} is homing.")
-            else:
-                results.append(f"Failed to home Printer {num}.")
+                return f"Printer {num} is busy ({state.name}), not homing.", False
+            try:
+                if await self.pm.command(num, printer.home_printer):
+                    return f"Printer {num} is homing.", True
+            except PrinterTimeout as e:
+                return str(e), False
+            except Exception as e:
+                return f"Failed to home Printer {num}: {e}", False
+            return f"Failed to home Printer {num}.", False
+
+        # All at once, so one slow printer doesn't hold up the rest
+        outcomes = await asyncio.gather(*(home(num) for num in nums))
+        results = [text for text, _ok in outcomes]
+        homed = [num for num, (_text, ok) in zip(nums, outcomes) if ok]
         if homed:
             await self.ms.log_message(f"{self.storage.display_name(update.effective_user.id)} homed "
                                       f"Printer(s) {', '.join(map(str, homed))}.")
