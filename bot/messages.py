@@ -11,6 +11,7 @@ from telegram.error import BadRequest, Forbidden
 from data import Storage
 from data.storage import PrintSession
 from errors import lookup_error
+from printers.timing import span
 from . import ui
 from .telegram_bot import BotContext
 
@@ -43,20 +44,21 @@ class MessageService:
     async def _send(self, chat_id, text: str, image: bytes | bytearray | None = None,
                     thread_id: int | None = None, reply_markup: InlineKeyboardMarkup | None = None):
         """Send a photo with caption if an image is given, otherwise a text message."""
-        if image:
-            return await self.bot.send_photo(
+        with span('telegram send photo' if image else 'telegram send'):
+            if image:
+                return await self.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=InputFile(bytes(image)),
+                    caption=text[:MessageLimit.CAPTION_LENGTH],
+                    message_thread_id=thread_id,
+                    reply_markup=reply_markup,
+                )
+            return await self.bot.send_message(
                 chat_id=chat_id,
-                photo=InputFile(bytes(image)),
-                caption=text[:MessageLimit.CAPTION_LENGTH],
+                text=text[:MessageLimit.MAX_TEXT_LENGTH],
                 message_thread_id=thread_id,
                 reply_markup=reply_markup,
             )
-        return await self.bot.send_message(
-            chat_id=chat_id,
-            text=text[:MessageLimit.MAX_TEXT_LENGTH],
-            message_thread_id=thread_id,
-            reply_markup=reply_markup,
-        )
 
     async def _send_main(self, text: str, image=None, reply_markup=None):
         return await self._send(self.ctx.chat_id, text, image, self.ctx.thread_id, reply_markup)
@@ -276,8 +278,10 @@ class MessageService:
             return
 
         self._log_buffer.append(message)
-        # Messages with an image are sent straight away so the image isn't dropped
-        await self.flush_logs(image, force=image is not None)
+        # Messages with an image are sent straight away so the image isn't dropped. Text waits for
+        # the monitor's flush (every update), so logging never waits on Telegram.
+        if image is not None:
+            await self.flush_logs(image, force=True)
 
     async def flush_logs(self, image: bytes | None = None, force: bool = False):
         """Send buffered log lines, at most once every LOG_THROTTLE seconds unless forced."""

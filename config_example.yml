@@ -17,6 +17,8 @@ log_chat_id: '1234567890'          # Chat for logs, or null to disable
 
 update_interval: 3          # seconds between printer polls (owner can change with /config)
 stats_log_interval: 3600    # seconds between update timing/status reports, or null to disable
+update_deviation_warn: 0.5  # log a step breakdown when an update starts this many seconds late, or null
+update_time_budget: 5       # most seconds one update may take before it is cut off
 auto_restart_printers: true # false to only log idle printers with no camera instead of rebooting them
 
 # Set a command to true to turn it off. A disabled /staff also leaves the owner as the
