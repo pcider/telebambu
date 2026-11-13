@@ -21,7 +21,9 @@ def make_monitor(**settings) -> tuple[PrinterMonitor, Mock]:
     pm.reconnect_if_needed = AsyncMock()
     ms = Mock(storage=Mock(), log_message=AsyncMock(), update_status_message=AsyncMock(),
               flush_logs=AsyncMock())
-    return PrinterMonitor(pm, ms, SimpleNamespace(**values)), ms
+    monitor = PrinterMonitor(pm, ms, SimpleNamespace(**values))
+    monitor.heartbeat_file = None  # don't touch the real /tmp/telebambu.heartbeat
+    return monitor, ms
 
 
 def logged(ms: Mock) -> list[str]:
@@ -170,6 +172,24 @@ class SlowUpdateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handled, ['started', 'layer 1', 'layer 2', 'finished'])
         self.assertFalse([t for t in logged(ms) if t.startswith('Slow update')], logged(ms))
 
+
+class HeartbeatTests(unittest.TestCase):
+    def test_writes_the_time_and_reports_failures_once(self):
+        import os
+        import tempfile
+        monitor, _ms = make_monitor()
+        with tempfile.TemporaryDirectory() as d:
+            monitor.heartbeat_file = os.path.join(d, 'heartbeat')
+            monitor._write_heartbeat()
+            with open(monitor.heartbeat_file) as f:
+                self.assertAlmostEqual(int(f.read()), time.time(), delta=2)
+
+            monitor.heartbeat_file = os.path.join(d, 'missing-dir', 'heartbeat')
+            out = io.StringIO()
+            with redirect_stdout(out):
+                monitor._write_heartbeat()
+                monitor._write_heartbeat()
+            self.assertEqual(out.getvalue().count('Failed to write heartbeat'), 1)
 
 class LibraryBlockingTests(unittest.IsolatedAsyncioTestCase):
     def test_state_reads_no_longer_send_pushall(self):

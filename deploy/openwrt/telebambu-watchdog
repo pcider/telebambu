@@ -1,0 +1,213 @@
+#!/bin/sh
+# Watchdog for the telebambu bot on OpenWrt. Install as /root/bin/telebambu-watchdog and run from
+# cron every minute. POSIX sh / busybox ash. Reports go to the bot's log chat through
+# telebambu-notify (Telegram HTTPS API), and to $LOG_FILE.
+#
+# Each run:
+#   - skips while a deploy runs (it does its own health check) or while $PAUSE_FILE exists
+#   - down:    no bot process -> report, restart the service, report whether it came back
+#   - frozen:  process older than STARTUP_GRACE and no heartbeat for HEARTBEAT_MAX seconds
+#              -> dump its stacks (SIGUSR1, see main.py) into the report, restart
+#   - crashed: new process, same git revision, not started by us -> procd respawned it after a
+#              crash; report it with the old process's last log lines
+#   - at most MAX_RESTARTS restarts per RESTART_WINDOW, then one "giving up" report
+#
+# Settings can be overridden with environment variables (see defaults below).
+
+set -u
+umask 077
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+
+APP_DIR=${APP_DIR:-/root/telebambu}
+STATE_DIR=${STATE_DIR:-/root/telebambu-deploy}
+LOG_FILE=${LOG_FILE:-$STATE_DIR/watchdog.log}
+LOCK_DIR=${LOCK_DIR:-/var/lock/telebambu-watchdog.lock}
+DEPLOY_LOCK=${DEPLOY_LOCK:-/var/lock/telebambu-deploy.lock}
+PAUSE_FILE=${PAUSE_FILE:-$STATE_DIR/watchdog.paused}
+SERVICE=${SERVICE:-/etc/init.d/telebambu}
+HEARTBEAT=${HEARTBEAT:-/tmp/telebambu.heartbeat}
+NOTIFY=${NOTIFY:-/root/bin/telebambu-notify}
+PYTHON=${PYTHON:-$APP_DIR/venv/bin/python}
+# Matches the process telebambu-run starts: ./venv/bin/python -u main.py
+BOT_PATTERN=${BOT_PATTERN:-python -u main.py}
+HEARTBEAT_MAX=${HEARTBEAT_MAX:-120}
+STARTUP_GRACE=${STARTUP_GRACE:-180}
+START_TIMEOUT=${START_TIMEOUT:-120}
+# A missing process is checked again after this long, in case procd is between respawns
+RECHECK_DELAY=${RECHECK_DELAY:-15}
+MAX_RESTARTS=${MAX_RESTARTS:-3}
+RESTART_WINDOW=${RESTART_WINDOW:-3600}
+
+BOT_LOG=$APP_DIR/telebambu.log
+STATE_FILE=$STATE_DIR/watchdog.state      # pid first-seen-time revision
+RESTARTS_FILE=$STATE_DIR/watchdog.restarts  # one timestamp per watchdog restart
+GAVE_UP_FILE=$STATE_DIR/watchdog.gave-up
+QUEUE_FILE=$STATE_DIR/watchdog-pending
+
+mkdir -p "$STATE_DIR" || exit 1
+
+if [ -f "$LOG_FILE" ] && [ "$(wc -c < "$LOG_FILE")" -gt 1048576 ]; then
+    mv -f "$LOG_FILE" "$LOG_FILE.1"
+fi
+
+log() {
+    printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$*" >> "$LOG_FILE"
+}
+
+# report <text>: log it and send it to the log chat (queued if Telegram can't be reached)
+report() {
+    log "report: $1"
+    "$PYTHON" "$NOTIFY" --queue "$QUEUE_FILE" "$1" >> "$LOG_FILE" 2>&1 || log "report not sent yet (queued)"
+}
+
+# ---------------------------------------------------------------- lock
+# A restart can take minutes, longer than the cron interval
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    other=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+    if [ -n "$other" ] && kill -0 "$other" 2>/dev/null; then
+        exit 0
+    fi
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+fi
+echo "$$" > "$LOCK_DIR/pid"
+trap 'rm -rf "$LOCK_DIR"' EXIT
+trap 'exit 1' HUP INT TERM
+
+# Reports queued while Telegram was unreachable go out first
+if [ -s "$QUEUE_FILE" ]; then
+    "$PYTHON" "$NOTIFY" --queue "$QUEUE_FILE" --flush-only >> "$LOG_FILE" 2>&1 || true
+fi
+
+[ -e "$PAUSE_FILE" ] && exit 0
+[ -d "$DEPLOY_LOCK" ] && exit 0
+
+# ---------------------------------------------------------------- helpers
+bot_pid() {
+    if command -v pgrep >/dev/null 2>&1; then
+        pgrep -f "$BOT_PATTERN" | head -n 1
+    else
+        # shellcheck disable=SC2009  # no pgrep on this build
+        ps w | grep -F "$BOT_PATTERN" | grep -v grep | awk 'NR == 1 { print $1 }'
+    fi
+}
+
+revision() {
+    git -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown
+}
+
+log_lines() {
+    if [ -f "$BOT_LOG" ]; then wc -l < "$BOT_LOG" | tr -d ' '; else echo 0; fi
+}
+
+save_state() {  # save_state <pid> <first-seen>
+    echo "$1 $2 $(revision)" > "$STATE_FILE"
+}
+
+# The previous process's last log lines: between the last two restart markers (its crash output)
+last_lines_before_restart() {
+    [ -f "$BOT_LOG" ] || return 0
+    markers=$(grep -n -- '--- BOT RESTARTED' "$BOT_LOG" | tail -n 2 | cut -d: -f1)
+    last=$(echo "$markers" | tail -n 1)
+    first=$(echo "$markers" | head -n 1)
+    [ -n "$last" ] && [ "$last" -gt 1 ] || return 0
+    [ "$first" = "$last" ] && first=0
+    sed -n "$((first + 1)),$((last - 1))p" "$BOT_LOG" | grep -v '^$' | tail -n 12
+}
+
+# Restarts in the window, pruning older ones
+recent_restarts() {
+    now=$1
+    [ -f "$RESTARTS_FILE" ] || { echo 0; return; }
+    awk -v now="$now" -v window="$RESTART_WINDOW" 'now - $1 < window' "$RESTARTS_FILE" > "$RESTARTS_FILE.tmp"
+    mv -f "$RESTARTS_FILE.tmp" "$RESTARTS_FILE"
+    wc -l < "$RESTARTS_FILE" | tr -d ' '
+}
+
+# may_restart <problem>: 0 if under the restart limit. Otherwise reports once that the watchdog is
+# giving up, and stays quiet until the bot is running again.
+may_restart() {
+    count=$(recent_restarts "$(date +%s)")
+    [ "$count" -lt "$MAX_RESTARTS" ] && return 0
+    if [ ! -f "$GAVE_UP_FILE" ]; then
+        report "$1, but it was already restarted $count times in the last $((RESTART_WINDOW / 60)) min. Not restarting again; check the router by hand ($BOT_LOG)."
+        touch "$GAVE_UP_FILE"
+    fi
+    return 1
+}
+
+# restart_bot <reason>: restart the service, wait for "Bot started!", report the outcome
+restart_bot() {
+    date +%s >> "$RESTARTS_FILE"
+
+    from=$(($(log_lines) + 1))
+    "$SERVICE" restart >> "$LOG_FILE" 2>&1
+    waited=0
+    while [ "$waited" -lt "$START_TIMEOUT" ]; do
+        if tail -n +"$from" "$BOT_LOG" 2>/dev/null | grep -q 'Bot started!'; then
+            pid=$(bot_pid)
+            save_state "${pid:-none}" "$(date +%s)"
+            report "Restarted after: $1. Back up after ${waited}s (revision $(revision))."
+            return 0
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+    save_state "$(bot_pid)" "$(date +%s)"
+    tail_out=$(tail -n +"$from" "$BOT_LOG" 2>/dev/null | grep -v '^$' | tail -n 10)
+    report "Restarted after: $1, but no 'Bot started!' within ${START_TIMEOUT}s. Last log lines:
+$tail_out"
+    return 1
+}
+
+# ---------------------------------------------------------------- checks
+now=$(date +%s)
+pid=$(bot_pid)
+last_pid= last_seen=0 last_rev=
+if [ -f "$STATE_FILE" ]; then
+    read -r last_pid last_seen last_rev < "$STATE_FILE" || true
+fi
+
+# Down
+if [ -z "$pid" ]; then
+    sleep "$RECHECK_DELAY"
+    pid=$(bot_pid)
+    if [ -z "$pid" ]; then
+        may_restart "Bot is down (no process)" || exit 0
+        report "Bot is down (no process). Restarting it."
+        restart_bot "bot was down"
+        exit 0
+    fi
+fi
+rm -f "$GAVE_UP_FILE"  # running again, so a later outage is reported afresh
+
+# New process since the last run
+if [ "$pid" != "$last_pid" ]; then
+    rev=$(revision)
+    if [ -n "$last_pid" ] && [ "$last_pid" != none ] && [ "$rev" = "$last_rev" ]; then
+        lines=$(last_lines_before_restart)
+        report "Bot restarted unexpectedly (new process, same revision $rev): it probably crashed and procd restarted it. Last lines before the restart:
+$lines"
+    fi
+    save_state "$pid" "$now"
+    exit 0
+fi
+
+# Frozen: alive, past the startup grace, but the monitor loop stopped writing its heartbeat
+case "$last_seen" in ''|*[!0-9]*) last_seen=$now ;; esac
+[ $((now - last_seen)) -lt "$STARTUP_GRACE" ] && exit 0
+beat=$(cat "$HEARTBEAT" 2>/dev/null | tr -d ' \n')
+case "$beat" in ''|*[!0-9]*) beat=$last_seen ;; esac
+age=$((now - beat))
+if [ "$age" -gt "$HEARTBEAT_MAX" ]; then
+    may_restart "Bot is frozen: no update for ${age}s (pid $pid)" || exit 0
+    from=$(($(log_lines) + 1))
+    kill -USR1 "$pid" 2>/dev/null  # faulthandler: every thread's stack to telebambu.log
+    sleep 3
+    stacks=$(tail -n +"$from" "$BOT_LOG" 2>/dev/null | grep -v '^$' | head -n 25)
+    [ -n "$stacks" ] || stacks="none (the process did not respond to SIGUSR1)"
+    report "Bot is frozen: no update for ${age}s (pid $pid). Restarting it. Stacks:
+$stacks"
+    restart_bot "bot was frozen for ${age}s"
+fi
+exit 0

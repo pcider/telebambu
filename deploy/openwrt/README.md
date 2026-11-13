@@ -162,3 +162,51 @@ Copy that file into a branch off `prod` as `requirements.txt`, check that the `b
 is a `git+https://...@<commit>` URL (not a local path), review it and merge it into `prod` like
 any change. CI then tests exactly what the router installs, and the deploy builds a
 new venv because `requirements.txt` changed.
+
+## 7. Watchdog (on the router)
+
+`telebambu-watchdog` runs from cron every minute and reports to the bot's log chat through the
+Telegram API (HTTPS, with the bot's own token from `config.yml`), via `telebambu-notify`:
+
+- **Down** (no bot process): reports it, restarts the service, then reports whether it came back
+  (`Bot started!` within 120 s).
+- **Frozen** (process running for over 3 min, but no heartbeat for 120 s): the monitor writes
+  `/tmp/telebambu.heartbeat` at the start of every update. The watchdog sends `SIGUSR1`, so the bot
+  writes every thread's stack to `telebambu.log`. It puts the start of that dump in the report and
+  restarts.
+- **Crashed** (new process, same git revision, not started by the watchdog): procd already
+  restarted it. The report includes the old process's last log lines. A manual
+  `/etc/init.d/telebambu restart` is reported the same way.
+- **Restart limit:** at most 3 restarts an hour. After that it reports once that it's giving up,
+  and stays quiet until the bot runs again.
+- **Skipped** while a deploy runs, and while `/root/telebambu-deploy/watchdog.paused` exists.
+- **Telegram unreachable:** reports are queued in `/root/telebambu-deploy/watchdog-pending` and
+  sent on the next run.
+
+Everything is also logged to `/root/telebambu-deploy/watchdog.log`. Settings (thresholds, paths)
+are environment variables at the top of `telebambu-watchdog`.
+
+Install (after a deploy has brought these files onto the router):
+
+```sh
+cp /root/telebambu/deploy/openwrt/telebambu-watchdog /root/bin/telebambu-watchdog
+cp /root/telebambu/deploy/openwrt/telebambu-notify   /root/bin/telebambu-notify
+chmod 700 /root/bin/telebambu-watchdog /root/bin/telebambu-notify
+# test the Telegram report (should appear in the log chat):
+/root/telebambu/venv/bin/python /root/bin/telebambu-notify "watchdog installed"
+(crontab -l 2>/dev/null | grep -v telebambu-watchdog; echo '* * * * * /root/bin/telebambu-watchdog') | crontab -
+/etc/init.d/cron restart
+```
+
+`/root/bin/` is already in `/etc/sysupgrade.conf` from step 2.
+
+Before stopping the bot on purpose: `touch /root/telebambu-deploy/watchdog.paused`. Afterwards:
+`rm /root/telebambu-deploy/watchdog.paused`.
+
+To test it (each report should arrive in the log chat within about 1–3 min):
+
+```sh
+/etc/init.d/telebambu stop                 # down: "Bot is down", then "Back up"
+kill -9 "$(pgrep -f 'python -u main.py')"  # crash: "restarted unexpectedly"
+kill -STOP "$(pgrep -f 'python -u main.py')"  # frozen, after about 3 min: "Bot is frozen", then "Back up"
+```

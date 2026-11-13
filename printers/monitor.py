@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,9 @@ CAMERA_STARTUP_GRACE = 30  # seconds
 LOW_FILAMENT_PERCENT = 10
 # Slow updates are logged one by one to stdout, and to the log chat at most this often, grouped
 SLOW_UPDATE_REPORT_INTERVAL = 60  # seconds
+# Written with the time at the start of every update, so the router's watchdog
+# (deploy/openwrt/telebambu-watchdog) can tell a frozen bot from a running one. tmpfs, so no flash wear.
+HEARTBEAT_FILE = os.environ.get('TELEBAMBU_HEARTBEAT', '/tmp/telebambu.heartbeat')
 # Only auto-restart printers in these states, so a running print is never interrupted
 NOT_PRINTING_STATES = (GcodeState.IDLE, GcodeState.FINISH)
 # States where a print is underway
@@ -72,6 +76,8 @@ class PrinterMonitor:
         # Step timings of the previous update, the event loop's lag, and the slowest update so far
         self._last_timer: StepTimer | None = None
         self._lag_probe = LoopLagProbe()
+        self.heartbeat_file: str | None = HEARTBEAT_FILE  # None turns the heartbeat off
+        self._heartbeat_failed = False
         self._slowest: tuple[float, str] | None = None  # (gap, breakdown) in the stats window
         self._slow_count = 0  # slow updates not yet reported to the log chat
         self._slow_worst: tuple[float, str] | None = None
@@ -96,6 +102,7 @@ class PrinterMonitor:
                     next_at = now  # fell behind: start now rather than bursting to catch up
                 await asyncio.sleep(next_at - now)
                 woke_late = time.monotonic() - next_at
+                self._write_heartbeat()
                 gap = self._record_tick()
                 try:
                     if gap is not None:
@@ -112,6 +119,21 @@ class PrinterMonitor:
         finally:
             self._lag_probe.stop()
             self._stop_background()
+
+    def _write_heartbeat(self):
+        """Record that the monitor loop is alive (a frozen event loop or a dead loop stops this)."""
+        if not self.heartbeat_file:
+            return
+        try:
+            tmp_file = self.heartbeat_file + '.tmp'
+            with open(tmp_file, 'w') as f:
+                f.write(f'{time.time():.0f}\n')
+            os.replace(tmp_file, self.heartbeat_file)
+            self._heartbeat_failed = False
+        except OSError as e:
+            if not self._heartbeat_failed:  # once per outage
+                print(f'Failed to write heartbeat {self.heartbeat_file}: {e}')
+                self._heartbeat_failed = True
 
     async def _run_update(self, timer: StepTimer):
         budget = self.settings.update_time_budget

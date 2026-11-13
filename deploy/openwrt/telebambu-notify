@@ -1,0 +1,119 @@
+"""Send a watchdog report to the bot's log chat through the Telegram Bot API (HTTPS).
+
+Install as /root/bin/telebambu-notify and run it with the bot's Python, which has PyYAML:
+    /root/telebambu/venv/bin/python /root/bin/telebambu-notify [--queue FILE] [--flush-only] MESSAGE
+
+Reads telegram_bot_token and log_chat_id ('chat_id' or 'chat_id/thread_id') from config.yml.
+Messages that can't be sent (network or Telegram down) are appended to the queue file and sent
+first on the next run, so a report about an outage isn't lost. Uses urllib rather than curl,
+which breaks on OpenWrt when curl and libcurl are upgraded separately. Never prints the token.
+"""
+import argparse
+import json
+import os
+import socket
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+DEFAULT_CONFIG = '/root/telebambu/config.yml'
+TELEGRAM_API = 'https://api.telegram.org'
+TIMEOUT = 15  # seconds per request
+MAX_TEXT = 4096  # Telegram's message length limit
+
+
+def load_target(config_path: str) -> tuple[str, str, int | None]:
+    """(token, chat_id, thread_id) of the log chat. Raises ValueError if it isn't configured."""
+    import yaml
+    with open(config_path) as f:
+        config = yaml.safe_load(f) or {}
+    token = str(config.get('telegram_bot_token') or '')
+    target = config.get('log_chat_id')
+    if not token or target is None:
+        raise ValueError(f'{config_path} has no telegram_bot_token or log_chat_id')
+    # Same format as bot/telegram_bot.py parse_chat_id
+    parts = str(target).strip().split('/')
+    if len(parts) > 2 or not parts[0] or (len(parts) == 2 and not parts[1].isdigit()):
+        raise ValueError(f'invalid log_chat_id {target!r}')
+    return token, parts[0], int(parts[1]) if len(parts) == 2 else None
+
+
+def send(token: str, chat_id: str, thread_id: int | None, text: str):
+    """POST sendMessage. Raises on failure, with the token removed from the error."""
+    fields = {'chat_id': chat_id, 'text': text[:MAX_TEXT], 'disable_web_page_preview': 'true'}
+    if thread_id is not None:
+        fields['message_thread_id'] = str(thread_id)
+    request = urllib.request.Request(f'{TELEGRAM_API}/bot{token}/sendMessage',
+                                     data=urllib.parse.urlencode(fields).encode())
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            reply = json.loads(response.read() or b'{}')
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors='replace')[:200]
+        raise RuntimeError(f'HTTP {e.code}: {detail}'.replace(token, '<token>')) from None
+    except Exception as e:
+        raise RuntimeError(f'{type(e).__name__}: {e}'.replace(token, '<token>')) from None
+    if not reply.get('ok'):
+        raise RuntimeError(f'Telegram refused the message: {str(reply)[:200]}'.replace(token, '<token>'))
+
+
+def read_queue(path: str | None) -> list[str]:
+    if not path or not os.path.exists(path):
+        return []
+    with open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def write_queue(path: str | None, messages: list[str]):
+    if not path:
+        return
+    if not messages:
+        if os.path.exists(path):
+            os.remove(path)
+        return
+    tmp_file = path + '.tmp'
+    with open(tmp_file, 'w') as f:
+        f.writelines(json.dumps(m) + '\n' for m in messages)
+    os.replace(tmp_file, path)
+
+
+def format_report(message: str) -> str:
+    return f"Watchdog ({socket.gethostname()}, {time.strftime('%Y-%m-%d %H:%M:%S')}): {message}"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('message', nargs='?', help='report to send')
+    parser.add_argument('--config', default=DEFAULT_CONFIG)
+    parser.add_argument('--queue', help='file holding reports that could not be sent yet')
+    parser.add_argument('--flush-only', action='store_true', help='only resend queued reports')
+    args = parser.parse_args(argv)
+
+    pending = read_queue(args.queue)
+    if args.message and not args.flush_only:
+        pending.append(format_report(args.message))
+    if not pending:
+        return 0
+    try:
+        token, chat_id, thread_id = load_target(args.config)
+    except Exception as e:
+        write_queue(args.queue, pending)
+        print(f'telebambu-notify: {e}', file=sys.stderr)
+        return 1
+
+    # Oldest first; stop at the first failure so the order is kept for the next run
+    while pending:
+        try:
+            send(token, chat_id, thread_id, pending[0])
+        except Exception as e:
+            print(f'telebambu-notify: not sent, {len(pending)} queued: {e}', file=sys.stderr)
+            break
+        pending.pop(0)
+    write_queue(args.queue, pending)
+    return 0 if not pending else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
