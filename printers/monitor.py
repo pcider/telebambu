@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 from bambulabs_api import GcodeState
 
 from .manager import PrinterManager, PrinterEvent, EventType, format_duration, to_int
-from .manager import EXTERNAL_SPOOL_TRAY
 
 from errors import is_filament_runout, lookup_error
 
@@ -174,7 +173,7 @@ class PrinterMonitor:
         if not snap or snap.state != GcodeState.RUNNING:
             return
         tray = next((t for t in self.pm.filament(num) if t.active), None)
-        if not tray or tray.tray_id == EXTERNAL_SPOOL_TRAY:
+        if not tray or tray.is_external_spool:
             return
 
         print_id, seen_above = self._filament_seen_above.get(num, (None, set()))
