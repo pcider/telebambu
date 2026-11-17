@@ -141,6 +141,11 @@ class FilamentTray:
     remain: int  # percent left, or -1 when the printer can't tell (e.g. non-Bambu spools)
     active: bool = False
 
+    @property
+    def is_external_spool(self) -> bool:
+        """The external spool has no sensor, so its remaining % is always 0, not a measurement."""
+        return self.tray_id == EXTERNAL_SPOOL_TRAY
+
     def describe(self) -> str:
         text = f"{self.label}: {self.material or 'empty'}"
         if self.color:

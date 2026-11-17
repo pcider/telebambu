@@ -163,7 +163,10 @@ class PrinterMonitor:
         if not snap or snap.state != GcodeState.RUNNING:
             return
         tray = next((t for t in self.pm.filament(num) if t.active), None)
-        if not tray or not 0 <= tray.remain <= LOW_FILAMENT_PERCENT or tray.tray_id in session.low_filament_alerted:
+        # The external spool has no sensor and always reports 0%, so it can't be "running low"
+        if not tray or tray.is_external_spool:
+            return
+        if not 0 <= tray.remain <= LOW_FILAMENT_PERCENT or tray.tray_id in session.low_filament_alerted:
             return
         self.storage.mark_low_filament_alerted(num, tray.tray_id)
         await self.ms.send_filament_notification(num, f"Filament is running low ({tray.describe()}).")
